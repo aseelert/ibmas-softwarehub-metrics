@@ -1727,7 +1727,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     background: var(--cds-border-subtle-01);
   }
   .cds--neo-canvas {
-    min-height: 640px;
+    min-height: 820px;
     background:
       linear-gradient(90deg, color-mix(in srgb, var(--cds-layer-02) 26%, transparent) 1px, transparent 1px),
       linear-gradient(0deg, color-mix(in srgb, var(--cds-layer-02) 26%, transparent) 1px, transparent 1px),
@@ -1737,12 +1737,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   }
   .cds--neo-canvas svg {
     width: 100%;
-    height: 640px;
+    height: 820px;
     display: block;
   }
   #dependency-graph-cy {
     width: 100%;
-    height: 640px;
+    height: 820px;
     display: block;
   }
   .cds--graph-controls {
@@ -2965,30 +2965,28 @@ function runDependencyLayout() {
   if (useDagre) {
     dependencyCy.layout({
       name: 'dagre',
-      rankDir: 'TB',          // top-to-bottom: software_hub at top, products below
-      ranker: 'tight-tree',   // best for clean hierarchical trees — avoids rank explosion
-      nodeSep: 60,            // horizontal space between nodes in same rank
-      edgeSep: 24,
-      rankSep: 110,           // vertical space between ranks — key for reducing overlap
-      align: 'UL',            // align nodes to upper-left within rank to reduce drift
-      acyclicer: 'greedy',    // break cycles before ranking (prevents feedback loops)
+      rankDir: 'TB',
+      ranker: 'network-simplex', // most overlap-free ranker for general graphs
+      nodeSep: 90,               // gap between nodes in the same rank (node is 160px wide → 90 gives breathing room)
+      edgeSep: 10,
+      rankSep: 140,              // vertical gap between ranks
+      acyclicer: 'greedy',
       animate: true,
-      animationDuration: 520,
+      animationDuration: 480,
       animationEasing: 'ease-out-cubic',
       fit: true,
-      padding: 56
+      padding: 72
     }).run();
   } else {
-    // Fallback: breadthfirst from software_hub root
     dependencyCy.layout({
       name: 'breadthfirst',
       directed: true,
       roots: dependencyCy.filter('node[id = "software_hub"]'),
-      spacingFactor: 1.6,
+      spacingFactor: 2.2,
       animate: true,
-      animationDuration: 520,
+      animationDuration: 480,
       fit: true,
-      padding: 56
+      padding: 72
     }).run();
   }
 }
@@ -3101,22 +3099,22 @@ function initDependencyCytoscape(nodeMap, graphEdges) {
   ];
 
   const edgeBase = {
-    'curve-style': 'unbundled-bezier',
+    'curve-style': 'taxi',        // orthogonal routing — lines go straight then turn 90°, never cross nodes
+    'taxi-direction': 'downward', // TB layout: prefer downward routing
+    'taxi-turn': 30,              // px before first turn
     'target-arrow-shape': 'triangle',
     'target-arrow-color': resolveCssColor('var(--cds-border-strong-01)'),
     'line-color': resolveCssColor('var(--cds-border-strong-01)'),
-    'width': 1.6,
-    'opacity': 0.78,
-    'label': 'data(label)',
+    'width': 1.5,
+    'opacity': 0.72,
+    'label': '',                  // no labels on edges by default — reduces clutter
     'font-size': 7,
     'font-family': 'IBM Plex Sans, Arial, sans-serif',
     'color': resolveCssColor('var(--cds-text-helper)'),
     'text-background-color': resolveCssColor('var(--cds-background)'),
     'text-background-opacity': 0.9,
     'text-background-padding': 2,
-    'text-rotation': 'autorotate',
-    'text-margin-y': -7,
-    'arrow-scale': 0.9,
+    'arrow-scale': 0.85,
     'transition-property': 'line-color, target-arrow-color, opacity, width',
     'transition-duration': 180
   };
@@ -3135,12 +3133,12 @@ function initDependencyCytoscape(nodeMap, graphEdges) {
           'background-color': 'data(bgColor)',
           'border-width': 2,
           'border-color': 'data(borderColor)',
-          'width': 130,
-          'height': 54,
-          'padding': '8px',
+          'width': 160,           // wide enough for longest label without wrapping
+          'height': 52,
+          'padding': '10px',
           'label': 'data(label)',
           'text-wrap': 'wrap',
-          'text-max-width': 110,
+          'text-max-width': 140,  // matches width - padding
           'text-valign': 'center',
           'text-halign': 'center',
           'color': 'data(textColor)',
@@ -3152,25 +3150,30 @@ function initDependencyCytoscape(nodeMap, graphEdges) {
           'transition-duration': 180
         }
       },
-      // Platform / metering nodes — wider, subdued bg, dark text
+      // Platform / metering — wider pill
       {
         selector: '.node-type-platform, .node-type-platform_dependency, .node-type-metering',
-        style: { 'width': 150, 'height': 50, 'font-size': 9, 'font-weight': 400, 'border-width': 1 }
+        style: { 'width': 180, 'height': 46, 'font-size': 9, 'font-weight': 400, 'border-width': 1, 'text-max-width': 160 }
       },
-      // Premium nodes — diamond, slightly larger
+      // Premium — diamond needs more room
       {
         selector: '.node-type-premium_reference',
-        style: { 'width': 150, 'height': 60 }
+        style: { 'width': 170, 'height': 70, 'text-max-width': 130 }
       },
-      // Integration bundle nodes — hexagon, teal
+      // Integration bundle — hexagon, compact
       {
         selector: '.node-type-integration_component',
-        style: { 'width': 120, 'height': 48, 'font-size': 9 }
+        style: { 'width': 144, 'height': 50, 'font-size': 9, 'text-max-width': 124 }
       },
-      // Installed nodes — thicker border
+      // Installed — thicker green border
       {
         selector: '.is-installed',
         style: { 'border-width': 3 }
+      },
+      // Focus node — pop out
+      {
+        selector: 'node.is-focus',
+        style: { 'border-width': 5, 'border-color': '#ffffff', 'width': 176, 'height': 60, 'font-size': 11 }
       },
 
       // ── Base edge ──────────────────────────────────────────────
@@ -3274,10 +3277,6 @@ function initDependencyCytoscape(nodeMap, graphEdges) {
         style: { 'opacity': 1, 'width': 3.5,
           'line-color': resolveCssColor('var(--cds-support-success)'),
           'target-arrow-color': resolveCssColor('var(--cds-support-success)') }
-      },
-      {
-        selector: 'node.is-focus',
-        style: { 'border-width': 5, 'border-color': '#ffffff', 'width': 158, 'height': 68, 'font-size': 11 }
       },
       {
         selector: 'edge.is-selected-edge',
