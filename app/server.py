@@ -1070,11 +1070,21 @@ class ClusterTelemetryCollector:
                     active_ids.add("datastage_ent")
                     active_ids.add("data_quality")
 
-        # Build annotated node list — only active nodes
+        # ── Graph simplification ─────────────────────────────────────────────
+        # zen (Software Hub Control Plane) and ccs (Common Core Services) are
+        # omitted as separate nodes. Instead, software_hub acts as the single
+        # platform root. Any edge that previously pointed to/from zen or ccs
+        # is redirected to software_hub so products still show their platform
+        # dependency without creating a noisy fan-out cluster.
+        COLLAPSED_INTO_HUB = {"zen", "ccs"}
+
+        # Build annotated node list — only active nodes, zen/ccs suppressed
         nodes = []
         for node in DEPENDENCY_EXPLORER_CATALOG["nodes"]:
             if node["id"] not in active_ids:
                 continue
+            if node["id"] in COLLAPSED_INTO_HUB:
+                continue  # folded into software_hub
             option = option_status.get(node["id"])
             installed = node["id"] in installed_ids or node["id"] in cr_to_dep.values()
             nodes.append({
@@ -1084,14 +1094,34 @@ class ClusterTelemetryCollector:
                 "evidence": option.get("evidence") if option else "Relationship catalog entry; verify with live CRs, install-options, entitlement, and License Service rows.",
             })
 
-        # Build edges — only where both endpoints are active
+        # Build edges — reroute zen/ccs refs → software_hub, deduplicate, skip self-loops
+        seen_edges: set = set()
         edges = []
         for edge in DEPENDENCY_EXPLORER_CATALOG["edges"]:
-            if edge["from"] not in active_ids or edge["to"] not in active_ids:
+            src = edge["from"]
+            tgt = edge["to"]
+            # Reroute collapsed nodes
+            if src in COLLAPSED_INTO_HUB:
+                src = "software_hub"
+            if tgt in COLLAPSED_INTO_HUB:
+                tgt = "software_hub"
+            # Skip if either endpoint not active (after rerouting)
+            active_node_ids = {n["id"] for n in nodes} | {"software_hub"}
+            if src not in active_node_ids or tgt not in active_node_ids:
                 continue
-            option = option_status.get(edge["to"]) or option_status.get(edge["from"])
+            # Skip self-loops (e.g. software_hub → software_hub after collapse)
+            if src == tgt:
+                continue
+            # Deduplicate — same src/tgt/relationship only once
+            dedup_key = (src, tgt, edge["relationship"])
+            if dedup_key in seen_edges:
+                continue
+            seen_edges.add(dedup_key)
+            option = option_status.get(tgt) or option_status.get(src)
             edges.append({
                 **edge,
+                "from": src,
+                "to": tgt,
                 "status": option.get("status") if option else "relationship",
                 "evidence": option.get("evidence") if option else edge.get("license_boundary", "Verify with IBM docs and License Service."),
             })
@@ -2915,27 +2945,52 @@ function highlightDependencyGraph(selectedId, selectedEdgeIndex = null) {
 
 function runDependencyLayout() {
   if (!dependencyCy) return;
-  const layoutName = typeof cytoscapeDagre !== 'undefined' ? 'dagre' : 'breadthfirst';
+  const useDagre = typeof cytoscapeDagre !== 'undefined';
+
+  // Temporarily hide platform-dep and foundation edges during layout so dagre
+  // doesn't use them for rank assignment — they cause everything to collapse
+  // onto a single rank. We re-show them after layout finishes.
+  const platformEdges = dependencyCy.edges('.edge-platform');
+  platformEdges.style('display', 'none');
+
   dependencyCy.one('layoutstop', () => {
+    platformEdges.style('display', 'element');
     if (dependencyExplorerState.selectedId) {
       showDependencyNode(dependencyExplorerState.selectedId);
     } else {
       fitDependencyGraph();
     }
   });
-  dependencyCy.layout({
-    name: layoutName,
-    rankDir: 'LR',
-    nodeSep: 44,
-    edgeSep: 18,
-    rankSep: 96,
-    spacingFactor: 1.08,
-    animate: true,
-    animationDuration: 620,
-    animationEasing: 'ease-out-cubic',
-    fit: false,
-    padding: 42
-  }).run();
+
+  if (useDagre) {
+    dependencyCy.layout({
+      name: 'dagre',
+      rankDir: 'TB',          // top-to-bottom: software_hub at top, products below
+      ranker: 'tight-tree',   // best for clean hierarchical trees — avoids rank explosion
+      nodeSep: 60,            // horizontal space between nodes in same rank
+      edgeSep: 24,
+      rankSep: 110,           // vertical space between ranks — key for reducing overlap
+      align: 'UL',            // align nodes to upper-left within rank to reduce drift
+      acyclicer: 'greedy',    // break cycles before ranking (prevents feedback loops)
+      animate: true,
+      animationDuration: 520,
+      animationEasing: 'ease-out-cubic',
+      fit: true,
+      padding: 56
+    }).run();
+  } else {
+    // Fallback: breadthfirst from software_hub root
+    dependencyCy.layout({
+      name: 'breadthfirst',
+      directed: true,
+      roots: dependencyCy.filter('node[id = "software_hub"]'),
+      spacingFactor: 1.6,
+      animate: true,
+      animationDuration: 520,
+      fit: true,
+      padding: 56
+    }).run();
+  }
 }
 
 function fitDependencyGraph() {
