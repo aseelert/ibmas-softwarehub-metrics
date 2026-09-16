@@ -441,9 +441,12 @@ DEPENDENCY_EXPLORER_CATALOG = {
         {"from": "watsonx_dataintelligence", "to": "datalineage",       "relationship": "bundled_as_ru",           "license_boundary": "MANTA Lineage bundled in WXD_INTELLIGENCE — RU metric, no separate VPC row."},
         {"from": "watsonx_dataintelligence", "to": "analyticsengine",   "relationship": "bundled_as_ru",           "license_boundary": "Analytics Engine bundled in WXD_INTELLIGENCE — RU metric."},
         {"from": "watsonx_dataintelligence", "to": "dataproduct",       "relationship": "bundled_as_ru",           "license_boundary": "Data Product Hub bundled in WXD_INTELLIGENCE — RU metric."},
+        # Standalone DataStage — deployed directly under Software Hub as a VPC product
+        {"from": "software_hub",          "to": "datastage_ent",         "relationship": "deploys_product",         "license_boundary": "Standalone DataStage Enterprise Cartridge → VPC. Used for ETL/ELT pipelines independently of WKC or watsonx.data editions."},
         # Standalone WKC (VPC-based, not bundled)
         {"from": "software_hub",          "to": "wkc",                   "relationship": "deploys_product",         "license_boundary": "Standalone WKC → VPC. Do not double-count if already covered by WXD_INTELLIGENCE."},
         {"from": "wkc",                   "to": "data_quality",          "relationship": "optional_install_option", "license_boundary": "enableDataQuality: true pulls DataStage as restricted DQ dependency."},
+        {"from": "wkc",                   "to": "datastage_ent",         "relationship": "optional_install_option", "license_boundary": "DataStage auto-installed when enableDataQuality: true — restricted to DQ workloads unless separately licensed for standalone ETL."},
         {"from": "wkc",                   "to": "knowledge_graph",       "relationship": "optional_install_option", "license_boundary": "Catalog graph option; confirm entitlement and product row."},
         {"from": "data_quality",          "to": "datastage_ent",         "relationship": "restricted_dependency",   "license_boundary": "DataStage present for WKC DQ only — not a standalone ETL license."},
         {"from": "wkc",                   "to": "datalineage",           "relationship": "optional_add_on",         "license_boundary": "Standalone MANTA requires WKC/IKC family parent; separate VPC row."},
