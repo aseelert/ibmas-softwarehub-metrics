@@ -2889,16 +2889,40 @@ function collectDependencyLineage(selectedId) {
   const nodesById = dependencyExplorerState.nodesById || {};
   const nodeIds = new Set([selectedId]);
   const edgeIndexes = new Set();
-  const visit = (startId, direction) => {
+
+  // Walk upstream: who deploys/contains the selected node?
+  // Stop expansion at platform roots (software_hub, license_service) — we include
+  // them as context nodes but do NOT continue downstream from them, which would
+  // pull in all sibling products.
+  const PLATFORM_ROOTS = new Set(['software_hub', 'license_service']);
+
+  const visitUpstream = (startId) => {
     const queue = [startId];
     const seen = new Set([startId]);
     while (queue.length) {
       const currentId = queue.shift();
-      const nextEdges = direction === 'upstream'
-        ? edges.filter(edge => edge.to === currentId)
-        : edges.filter(edge => edge.from === currentId);
-      nextEdges.forEach(edge => {
-        const nextId = direction === 'upstream' ? edge.from : edge.to;
+      edges.filter(edge => edge.to === currentId).forEach(edge => {
+        const nextId = edge.from;
+        if (!nodesById[nextId] || seen.has(nextId)) return;
+        seen.add(nextId);
+        nodeIds.add(nextId);
+        edgeIndexes.add(edge.edgeIndex);
+        // Include the platform root as context but don't walk further upstream from it
+        if (!PLATFORM_ROOTS.has(nextId)) queue.push(nextId);
+      });
+    }
+  };
+
+  // Walk downstream: what does the selected node deploy/bundle?
+  const visitDownstream = (startId) => {
+    const queue = [startId];
+    const seen = new Set([startId]);
+    while (queue.length) {
+      const currentId = queue.shift();
+      // Don't fan out downstream from platform roots — avoids pulling in all siblings
+      if (PLATFORM_ROOTS.has(currentId) && currentId !== startId) return;
+      edges.filter(edge => edge.from === currentId).forEach(edge => {
+        const nextId = edge.to;
         if (!nodesById[nextId] || seen.has(nextId)) return;
         seen.add(nextId);
         nodeIds.add(nextId);
@@ -2907,21 +2931,23 @@ function collectDependencyLineage(selectedId) {
       });
     }
   };
-  visit(selectedId, 'upstream');
-  visit(selectedId, 'downstream');
 
-  // Platform and metering context should remain visible for selected products and ancestors.
+  visitUpstream(selectedId);
+  visitDownstream(selectedId);
+
+  // For every node in the lineage, also pull in direct metering edges (license_service)
+  // so compliance context is always visible.
   [...nodeIds].forEach(id => {
     edges.filter(edge => edge.from === id).forEach(edge => {
       const target = nodesById[edge.to];
       const relationship = String(edge.relationship || '');
-      const type = String(target?.type || '');
-      if (type === 'metering' || relationship.includes('platform_dependency') || relationship.includes('foundation_dependency') || relationship.includes('measured_by')) {
+      if (String(target?.type || '') === 'metering' || relationship.includes('measured_by')) {
         nodeIds.add(edge.to);
         edgeIndexes.add(edge.edgeIndex);
       }
     });
   });
+
   return { nodeIds, edgeIndexes };
 }
 
