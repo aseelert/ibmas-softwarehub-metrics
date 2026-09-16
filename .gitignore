@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.class
+.venv/
+env/
+venv/
+ENV/
+
+# Environment files with sensitive credentials
+# (.env.example is committed, .env contains local cluster tokens)
+.env.local
+
+# Testing & logs
+.pytest_cache/
+*.log
+
+# OS & Editor
+.DS_Store
+.idea/
+.vscode/

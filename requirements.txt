@@ -1,0 +1,4 @@
+# IBM Software Hub & Cloud Pak for Data Telemetry Dashboard
+# Standalone architecture: standard library only (zero mandatory third-party pip dependencies).
+# Optional test packages:
+pytest>=7.4.0
