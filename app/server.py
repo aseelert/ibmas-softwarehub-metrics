@@ -34,6 +34,7 @@ SSL_CTX.verify_mode = ssl.CERT_NONE
 DEFAULT_PORT = 8088
 DEFAULT_HOST = "0.0.0.0"
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VENDOR_DIR = os.path.join(ROOT_DIR, "app", "vendor")
 
 def _load_env_file(env_path: str):
     """Load key-value pairs from .env into os.environ if not already set."""
@@ -1026,10 +1027,56 @@ class ClusterTelemetryCollector:
     def get_dependency_explorer(self, installed_services: Dict[str, Any], install_options: Dict[str, Any]) -> Dict[str, Any]:
         installed_ids = set(installed_services.keys())
         option_status = {entry.get("id"): entry for entry in install_options.get("entries", [])}
+        wxd_edition = os.environ.get("WXD_EDITION", "").upper()
+
+        # Determine which catalog node IDs are "active" based on installed CRs + WXD_EDITION
+        # Always include platform backbone
+        active_ids: set = {"software_hub", "license_service", "ccs", "zen", "opensearch"}
+
+        # Add installed CRs and map KNOWN_SERVICES_CATALOG ids to dep-explorer ids
+        cr_to_dep = {
+            "watsonx_data": "watsonx_data",
+            "wkc": "wkc",
+            "datastage": "datastage_ent",
+            "lineage": "datalineage",
+            "analyticsengine": "analyticsengine",
+            "opencontent_opensearch": "opensearch",
+        }
+        for cr_id in installed_ids:
+            dep_id = cr_to_dep.get(cr_id, cr_id)
+            active_ids.add(dep_id)
+
+        # Add the watsonx.data edition node and its bundled components
+        if wxd_edition == "WXD_LAKEHOUSE_PREMIUM":
+            active_ids.update(["watsonx_data", "watsonx_data_premium", "lite_milvus"])
+        elif wxd_edition == "WXD_INTEGRATION":
+            active_ids.update(["watsonx_data", "wxd_integration", "datastage_ent", "replication", "databand", "streamsets"])
+        elif wxd_edition == "WXD_INTELLIGENCE":
+            active_ids.update(["watsonx_data", "wxd_integration", "watsonx_dataintelligence",
+                                "datastage_ent", "replication", "databand", "streamsets",
+                                "wkc", "ikc_premium", "datalineage", "analyticsengine", "dataproduct"])
+        elif "watsonx_data" in installed_ids:
+            active_ids.update(["watsonx_data", "analyticsengine", "opensearch", "lite_milvus"])
+
+        # Always include watsonx_data if any lakehouse is active
+        if any(i in active_ids for i in ["wxd_integration", "watsonx_dataintelligence", "watsonx_data_premium"]):
+            active_ids.add("watsonx_data")
+
+        # Pull in install-option nodes that are confirmed configured
+        for entry in install_options.get("entries", []):
+            if entry.get("status") == "configured":
+                active_ids.add(entry["id"])
+                if entry["id"] == "data_quality":
+                    active_ids.add("datastage_ent")
+                    active_ids.add("data_quality")
+
+        # Build annotated node list — only active nodes
         nodes = []
         for node in DEPENDENCY_EXPLORER_CATALOG["nodes"]:
+            if node["id"] not in active_ids:
+                continue
             option = option_status.get(node["id"])
-            installed = node["id"] in installed_ids
+            installed = node["id"] in installed_ids or node["id"] in cr_to_dep.values()
             nodes.append({
                 **node,
                 "installed": installed,
@@ -1037,8 +1084,11 @@ class ClusterTelemetryCollector:
                 "evidence": option.get("evidence") if option else "Relationship catalog entry; verify with live CRs, install-options, entitlement, and License Service rows.",
             })
 
+        # Build edges — only where both endpoints are active
         edges = []
         for edge in DEPENDENCY_EXPLORER_CATALOG["edges"]:
+            if edge["from"] not in active_ids or edge["to"] not in active_ids:
+                continue
             option = option_status.get(edge["to"]) or option_status.get(edge["from"])
             edges.append({
                 **edge,
@@ -1046,13 +1096,22 @@ class ClusterTelemetryCollector:
                 "evidence": option.get("evidence") if option else edge.get("license_boundary", "Verify with IBM docs and License Service."),
             })
 
+        edition_label = {
+            "WXD_LAKEHOUSE_PREMIUM": "watsonx.data Premium",
+            "WXD_INTEGRATION": "watsonx.data Integration",
+            "WXD_INTELLIGENCE": "watsonx.data Intelligence",
+        }.get(wxd_edition, "watsonx.data Lakehouse (Standard)" if "watsonx_data" in installed_ids else "CPD standalone")
+
         return {
             "nodes": nodes,
             "edges": edges,
             "sources": DEPENDENCY_EXPLORER_CATALOG["sources"],
+            "wxd_edition": wxd_edition,
+            "edition_label": edition_label,
             "positioning": (
-                "This explorer is intentionally conservative: optional capabilities and dependencies explain deployment shape, "
-                "but License Service product/bundled-product rows and entitlement terms decide metering."
+                f"Showing active components only (WXD_EDITION={wxd_edition or 'not set'}, "
+                f"{len(installed_ids)} live CRs detected). "
+                "License Service product/bundled-product rows and entitlement terms decide metering."
             )
         }
 
@@ -1650,6 +1709,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     width: 100%;
     height: 640px;
     display: block;
+  }
+  #dependency-graph-cy {
+    width: 100%;
+    height: 640px;
+    display: block;
+  }
+  .cds--graph-controls {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 2;
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
   .cds--neo-link {
     stroke: var(--cds-border-strong-01);
@@ -2642,12 +2716,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 </div>
 
+<script src="/vendor/cytoscape.min.js"></script>
+<script src="/vendor/dagre.min.js"></script>
+<script src="/vendor/cytoscape-dagre.js"></script>
 <script>
 let currentScaleOverride = 'live';
 let rawData = null;
 let supportedServices = [];
 let rawInspectorItems = [];
 let dependencyExplorerState = { nodesById: {}, edges: [], selectedId: null };
+let dependencyCy = null;
+let cytoscapeDagreRegistered = false;
+let dependencyGraphSignature = '';
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -2702,8 +2782,7 @@ function showDependencyNode(nodeId) {
   const node = dependencyExplorerState.nodesById[nodeId];
   if (!node) return;
   dependencyExplorerState.selectedId = nodeId;
-  drawDependencyLineage(nodeId);
-  document.querySelectorAll('.cds--neo-node').forEach(el => el.classList.toggle('is-selected', el.dataset.nodeId === nodeId));
+  highlightDependencyGraph(nodeId);
   const inbound = dependencyExplorerState.edges.filter(edge => edge.to === nodeId);
   const outbound = dependencyExplorerState.edges.filter(edge => edge.from === nodeId);
   const status = node.option_status || (node.installed ? 'installed' : dependencyTypeLabel(node.type));
@@ -2734,7 +2813,7 @@ function showDependencyEdge(edgeIndex) {
   const edge = dependencyExplorerState.edges[edgeIndex];
   if (!edge) return;
   dependencyExplorerState.selectedId = edge.from;
-  drawDependencyLineage(edge.from);
+  highlightDependencyGraph(edge.from, edgeIndex);
   const from = dependencyExplorerState.nodesById[edge.from]?.label || edge.from;
   const to = dependencyExplorerState.nodesById[edge.to]?.label || edge.to;
   const panel = document.getElementById('dependency-detail-panel');
@@ -2764,6 +2843,405 @@ function dependencyNodeColor(node) {
   if (type.includes('option') || type.includes('add_on')) return 'var(--cds-interactive-01)';
   if (type.includes('dependency')) return 'var(--cds-support-info)';
   return 'var(--cds-text-helper)';
+}
+
+function resolveCssColor(value) {
+  const match = String(value || '').match(/^var\\((--[^)]+)\\)$/);
+  if (!match) return value;
+  return getComputedStyle(document.documentElement).getPropertyValue(match[1]).trim() || value;
+}
+
+function collectDependencyLineage(selectedId) {
+  const edges = dependencyExplorerState.edges || [];
+  const nodesById = dependencyExplorerState.nodesById || {};
+  const nodeIds = new Set([selectedId]);
+  const edgeIndexes = new Set();
+  const visit = (startId, direction) => {
+    const queue = [startId];
+    const seen = new Set([startId]);
+    while (queue.length) {
+      const currentId = queue.shift();
+      const nextEdges = direction === 'upstream'
+        ? edges.filter(edge => edge.to === currentId)
+        : edges.filter(edge => edge.from === currentId);
+      nextEdges.forEach(edge => {
+        const nextId = direction === 'upstream' ? edge.from : edge.to;
+        if (!nodesById[nextId] || seen.has(nextId)) return;
+        seen.add(nextId);
+        nodeIds.add(nextId);
+        edgeIndexes.add(edge.edgeIndex);
+        queue.push(nextId);
+      });
+    }
+  };
+  visit(selectedId, 'upstream');
+  visit(selectedId, 'downstream');
+
+  // Platform and metering context should remain visible for selected products and ancestors.
+  [...nodeIds].forEach(id => {
+    edges.filter(edge => edge.from === id).forEach(edge => {
+      const target = nodesById[edge.to];
+      const relationship = String(edge.relationship || '');
+      const type = String(target?.type || '');
+      if (type === 'metering' || relationship.includes('platform_dependency') || relationship.includes('foundation_dependency') || relationship.includes('measured_by')) {
+        nodeIds.add(edge.to);
+        edgeIndexes.add(edge.edgeIndex);
+      }
+    });
+  });
+  return { nodeIds, edgeIndexes };
+}
+
+function highlightDependencyGraph(selectedId, selectedEdgeIndex = null) {
+  if (!dependencyCy) return;
+  const lineage = collectDependencyLineage(selectedId);
+  dependencyCy.batch(() => {
+    dependencyCy.elements().removeClass('is-dim is-lineage is-focus is-selected-edge');
+    dependencyCy.elements().addClass('is-dim');
+    dependencyCy.nodes().filter(ele => lineage.nodeIds.has(ele.id())).removeClass('is-dim').addClass('is-lineage');
+    dependencyCy.edges().filter(ele => lineage.edgeIndexes.has(ele.data('edgeIndex'))).removeClass('is-dim').addClass('is-lineage');
+    dependencyCy.$id(selectedId).removeClass('is-dim').addClass('is-focus');
+    if (selectedEdgeIndex !== null) {
+      dependencyCy.edges().filter(ele => ele.data('edgeIndex') === selectedEdgeIndex).removeClass('is-dim').addClass('is-selected-edge');
+    }
+  });
+  const visible = dependencyCy.elements('.is-lineage, .is-focus, .is-selected-edge');
+  dependencyCy.animate({
+    fit: { eles: visible.length ? visible : dependencyCy.elements(), padding: 42 },
+    duration: 360,
+    easing: 'ease-out-cubic'
+  });
+}
+
+function runDependencyLayout() {
+  if (!dependencyCy) return;
+  const layoutName = typeof cytoscapeDagre !== 'undefined' ? 'dagre' : 'breadthfirst';
+  dependencyCy.one('layoutstop', () => {
+    if (dependencyExplorerState.selectedId) {
+      showDependencyNode(dependencyExplorerState.selectedId);
+    } else {
+      fitDependencyGraph();
+    }
+  });
+  dependencyCy.layout({
+    name: layoutName,
+    rankDir: 'LR',
+    nodeSep: 44,
+    edgeSep: 18,
+    rankSep: 96,
+    spacingFactor: 1.08,
+    animate: true,
+    animationDuration: 620,
+    animationEasing: 'ease-out-cubic',
+    fit: false,
+    padding: 42
+  }).run();
+}
+
+function fitDependencyGraph() {
+  if (!dependencyCy) return;
+  dependencyCy.animate({
+    fit: { eles: dependencyCy.elements(), padding: 42 },
+    duration: 320,
+    easing: 'ease-out-cubic'
+  });
+}
+
+function nodeShape(node) {
+  const t = node?.type || '';
+  if (t === 'platform' || t === 'metering')        return 'barrel';
+  if (t === 'platform_dependency')                  return 'round-rectangle';
+  if (t === 'core_product')                         return 'round-rectangle';
+  if (t.includes('premium'))                        return 'diamond';
+  if (t.includes('integration_component'))          return 'hexagon';
+  if (t.includes('add_on') || t.includes('add-on')) return 'ellipse';
+  if (t.includes('option'))                         return 'cut-rectangle';
+  if (t.includes('dependency'))                     return 'round-rectangle';
+  return 'round-rectangle';
+}
+
+function edgeClass(relationship) {
+  const r = String(relationship || '');
+  if (r.includes('bundled_as_ru'))       return 'edge-bundled';
+  if (r.includes('platform_dependency') || r.includes('foundation_dependency')) return 'edge-platform';
+  if (r.includes('optional') || r.includes('option')) return 'edge-optional';
+  if (r.includes('restricted'))          return 'edge-restricted';
+  if (r.includes('premium'))             return 'edge-premium';
+  if (r.includes('edition_uplift'))      return 'edge-edition';
+  if (r.includes('measured_by'))         return 'edge-metering';
+  return '';
+}
+
+function initDependencyCytoscape(nodeMap, graphEdges) {
+  const container = document.getElementById('dependency-graph-cy');
+  if (!container || typeof cytoscape === 'undefined') return;
+  if (typeof cytoscapeDagre !== 'undefined' && !cytoscapeDagreRegistered) {
+    cytoscape.use(cytoscapeDagre);
+    cytoscapeDagreRegistered = true;
+  }
+  if (dependencyCy) {
+    dependencyCy.destroy();
+    dependencyCy = null;
+  }
+
+  const col = {
+    platform:    resolveCssColor('var(--cds-layer-02)'),
+    metering:    resolveCssColor('var(--cds-support-success)'),
+    core:        resolveCssColor('var(--cds-interactive-01)'),
+    premium:     '#7c3aed',
+    integration: '#0e7490',
+    addon:       '#0891b2',
+    option:      '#6366f1',
+    dependency:  resolveCssColor('var(--cds-support-info)'),
+    installed_border: resolveCssColor('var(--cds-support-success)'),
+    default_border:   resolveCssColor('var(--cds-border-strong-01)'),
+  };
+  function nodeColor(node) {
+    const t = node?.type || '';
+    if (t === 'metering') return col.metering;
+    if (t === 'platform' || t === 'platform_dependency') return col.platform;
+    if (t === 'core_product') return col.core;
+    if (t.includes('premium')) return col.premium;
+    if (t.includes('integration_component')) return col.integration;
+    if (t.includes('add_on') || t.includes('add-on')) return col.addon;
+    if (t.includes('option')) return col.option;
+    if (t.includes('dependency')) return col.dependency;
+    return col.dependency;
+  }
+
+  const elements = [
+    ...Object.values(nodeMap).map(node => {
+      const status = node.option_status || (node.installed ? 'installed' : dependencyTypeLabel(node.type));
+      const bgColor = nodeColor(node);
+      const isPlatform = node.type === 'platform' || node.type === 'platform_dependency' || node.type === 'metering';
+      const textColor = isPlatform ? resolveCssColor('var(--cds-text-primary)') : '#ffffff';
+      return {
+        data: {
+          id: node.id,
+          label: node.label,
+          status,
+          type: dependencyTypeLabel(node.type),
+          bgColor,
+          textColor,
+          borderColor: node.installed ? col.installed_border : col.default_border,
+          shape: nodeShape(node),
+        },
+        classes: [
+          node.installed ? 'is-installed' : '',
+          `node-type-${(node.type || '').replace(/[^a-z_]/g, '_')}`,
+        ].filter(Boolean).join(' ')
+      };
+    }),
+    ...graphEdges.map(edge => ({
+      data: {
+        id: `edge-${edge.edgeIndex}`,
+        source: edge.from,
+        target: edge.to,
+        label: dependencyTypeLabel(edge.relationship),
+        relationship: edge.relationship,
+        edgeIndex: edge.edgeIndex
+      },
+      classes: edgeClass(edge.relationship)
+    }))
+  ];
+
+  const edgeBase = {
+    'curve-style': 'unbundled-bezier',
+    'target-arrow-shape': 'triangle',
+    'target-arrow-color': resolveCssColor('var(--cds-border-strong-01)'),
+    'line-color': resolveCssColor('var(--cds-border-strong-01)'),
+    'width': 1.6,
+    'opacity': 0.78,
+    'label': 'data(label)',
+    'font-size': 7,
+    'font-family': 'IBM Plex Sans, Arial, sans-serif',
+    'color': resolveCssColor('var(--cds-text-helper)'),
+    'text-background-color': resolveCssColor('var(--cds-background)'),
+    'text-background-opacity': 0.9,
+    'text-background-padding': 2,
+    'text-rotation': 'autorotate',
+    'text-margin-y': -7,
+    'arrow-scale': 0.9,
+    'transition-property': 'line-color, target-arrow-color, opacity, width',
+    'transition-duration': 180
+  };
+
+  dependencyCy = cytoscape({
+    container,
+    elements,
+    minZoom: 0.3,
+    maxZoom: 2.5,
+    style: [
+      // ── Base node ──────────────────────────────────────────────
+      {
+        selector: 'node',
+        style: {
+          'shape': 'data(shape)',
+          'background-color': 'data(bgColor)',
+          'border-width': 2,
+          'border-color': 'data(borderColor)',
+          'width': 130,
+          'height': 54,
+          'padding': '8px',
+          'label': 'data(label)',
+          'text-wrap': 'wrap',
+          'text-max-width': 110,
+          'text-valign': 'center',
+          'text-halign': 'center',
+          'color': 'data(textColor)',
+          'font-family': 'IBM Plex Sans, Arial, sans-serif',
+          'font-size': 10,
+          'font-weight': 600,
+          'overlay-opacity': 0,
+          'transition-property': 'border-width, border-color, opacity',
+          'transition-duration': 180
+        }
+      },
+      // Platform / metering nodes — wider, subdued bg, dark text
+      {
+        selector: '.node-type-platform, .node-type-platform_dependency, .node-type-metering',
+        style: { 'width': 150, 'height': 50, 'font-size': 9, 'font-weight': 400, 'border-width': 1 }
+      },
+      // Premium nodes — diamond, slightly larger
+      {
+        selector: '.node-type-premium_reference',
+        style: { 'width': 150, 'height': 60 }
+      },
+      // Integration bundle nodes — hexagon, teal
+      {
+        selector: '.node-type-integration_component',
+        style: { 'width': 120, 'height': 48, 'font-size': 9 }
+      },
+      // Installed nodes — thicker border
+      {
+        selector: '.is-installed',
+        style: { 'border-width': 3 }
+      },
+
+      // ── Base edge ──────────────────────────────────────────────
+      { selector: 'edge', style: { ...edgeBase } },
+
+      // Bundled-as-RU — thick teal solid + label badge
+      {
+        selector: 'edge.edge-bundled',
+        style: {
+          'line-color': '#0e7490',
+          'target-arrow-color': '#0e7490',
+          'width': 2.8,
+          'opacity': 0.95,
+          'line-style': 'solid',
+          'color': '#0e7490',
+        }
+      },
+      // Platform / foundation — dotted, muted
+      {
+        selector: 'edge.edge-platform',
+        style: {
+          'line-style': 'dotted',
+          'line-color': resolveCssColor('var(--cds-border-subtle-01)'),
+          'target-arrow-color': resolveCssColor('var(--cds-border-subtle-01)'),
+          'width': 1,
+          'opacity': 0.5,
+          'label': '',  // no label on platform deps — reduces clutter
+        }
+      },
+      // Optional / install-option — long-dashed blue
+      {
+        selector: 'edge.edge-optional',
+        style: {
+          'line-style': 'dashed',
+          'line-dash-pattern': [8, 4],
+          'line-color': '#6366f1',
+          'target-arrow-color': '#6366f1',
+          'target-arrow-shape': 'triangle-backcurve',
+          'width': 1.6,
+          'opacity': 0.82,
+        }
+      },
+      // Restricted dependency — dashed red
+      {
+        selector: 'edge.edge-restricted',
+        style: {
+          'line-style': 'dashed',
+          'line-dash-pattern': [5, 3],
+          'line-color': resolveCssColor('var(--cds-support-error)'),
+          'target-arrow-color': resolveCssColor('var(--cds-support-error)'),
+          'width': 2,
+          'opacity': 0.9,
+          'color': resolveCssColor('var(--cds-support-error)'),
+        }
+      },
+      // Premium reference — dashed purple
+      {
+        selector: 'edge.edge-premium',
+        style: {
+          'line-style': 'dashed',
+          'line-dash-pattern': [6, 3],
+          'line-color': '#7c3aed',
+          'target-arrow-color': '#7c3aed',
+          'width': 2,
+          'opacity': 0.88,
+          'color': '#7c3aed',
+        }
+      },
+      // Edition uplift — double-line effect via thick + colored
+      {
+        selector: 'edge.edge-edition',
+        style: {
+          'line-color': resolveCssColor('var(--cds-interactive-01)'),
+          'target-arrow-color': resolveCssColor('var(--cds-interactive-01)'),
+          'width': 2.4,
+          'opacity': 0.9,
+          'target-arrow-shape': 'triangle',
+        }
+      },
+      // Metering edge (measured_by)
+      {
+        selector: 'edge.edge-metering',
+        style: {
+          'line-color': resolveCssColor('var(--cds-support-success)'),
+          'target-arrow-color': resolveCssColor('var(--cds-support-success)'),
+          'line-style': 'dashed',
+          'line-dash-pattern': [10, 4],
+          'width': 1.8,
+          'opacity': 0.75,
+        }
+      },
+
+      // ── Interaction states ──────────────────────────────────────
+      { selector: '.is-dim', style: { 'opacity': 0.12 } },
+      {
+        selector: 'node.is-lineage',
+        style: { 'opacity': 1, 'border-width': 4, 'border-color': resolveCssColor('var(--cds-interactive-01)') }
+      },
+      {
+        selector: 'edge.is-lineage',
+        style: { 'opacity': 1, 'width': 3.5,
+          'line-color': resolveCssColor('var(--cds-support-success)'),
+          'target-arrow-color': resolveCssColor('var(--cds-support-success)') }
+      },
+      {
+        selector: 'node.is-focus',
+        style: { 'border-width': 5, 'border-color': '#ffffff', 'width': 158, 'height': 68, 'font-size': 11 }
+      },
+      {
+        selector: 'edge.is-selected-edge',
+        style: { 'width': 4.5,
+          'line-color': resolveCssColor('var(--cds-interactive-01)'),
+          'target-arrow-color': resolveCssColor('var(--cds-interactive-01)') }
+      },
+      {
+        selector: 'node:active',
+        style: { 'overlay-opacity': 0.08, 'overlay-color': '#ffffff' }
+      }
+    ]
+  });
+
+  dependencyCy.on('tap', 'node', event => showDependencyNode(event.target.id()));
+  dependencyCy.on('tap', 'edge', event => showDependencyEdge(event.target.data('edgeIndex')));
+  dependencyCy.on('mouseover', 'node, edge', event => event.target.addClass('is-hover'));
+  dependencyCy.on('mouseout', 'node, edge', event => event.target.removeClass('is-hover'));
+  runDependencyLayout();
 }
 
 function compactLabel(label, max = 22) {
@@ -3093,6 +3571,10 @@ function toggleDarkMode() {
   document.documentElement.setAttribute('data-mode', next);
   document.getElementById('mode-text').innerText = next === 'dark' ? 'Dark Mode' : 'Light Mode';
   localStorage.setItem('cds_mode', next);
+  dependencyGraphSignature = '';
+  if (rawData?.dependency_explorer) {
+    renderDependencyExplorer(rawData.dependency_explorer);
+  }
 }
 
 function initPreferences() {
@@ -3440,6 +3922,11 @@ function renderDependencyExplorer(graph) {
   const root = document.getElementById('dependency-explorer');
   const nodes = graph.nodes || [];
   const edges = graph.edges || [];
+  const graphSignature = JSON.stringify({
+    nodes: nodes.map(node => [node.id, node.label, node.type, node.installed, node.option_status]),
+    edges: edges.map(edge => [edge.from, edge.to, edge.relationship, edge.status])
+  });
+  const previousSelectedId = dependencyExplorerState.selectedId;
   const sourcesIndex = addRawInspectorItem('Dependency explorer sources', {
     positioning: graph.positioning,
     sources: graph.sources || [],
@@ -3461,7 +3948,13 @@ function renderDependencyExplorer(graph) {
     toNode: nodeMap[edge.to],
     rawIndex: addRawInspectorItem(`Relationship: ${edge.from} -> ${edge.to}`, edge),
   })).filter(edge => edge.fromNode && edge.toNode);
-  dependencyExplorerState = { nodesById: nodeMap, edges: graphEdges, selectedId: nodes.find(node => node.id === 'watsonx_data') ? 'watsonx_data' : (nodes[0]?.id || '') };
+  const selectedId = nodeMap[previousSelectedId] ? previousSelectedId : nodes.find(node => node.id === 'watsonx_data') ? 'watsonx_data' : (nodes[0]?.id || '');
+  dependencyExplorerState = { nodesById: nodeMap, edges: graphEdges, selectedId };
+  if (dependencyCy && dependencyGraphSignature === graphSignature && root.querySelector('#dependency-graph-cy')) {
+    showDependencyNode(selectedId);
+    return;
+  }
+  dependencyGraphSignature = graphSignature;
 
   const relationshipCards = graphEdges.map((edge, edgeIndex) => {
     const from = nodes.find(n => n.id === edge.from)?.label || edge.from;
@@ -3486,40 +3979,52 @@ function renderDependencyExplorer(graph) {
   const optionNodes = nodes.filter(node => node.type.includes('option')).length;
   const dependencyNodes = nodes.filter(node => node.type.includes('dependency')).length;
 
+  const editionLabel = graph.edition_label || '';
   root.innerHTML = `
     <div class="cds--dependency-toolbar">
-      <div style="font-size:12px; color:var(--cds-text-secondary); max-width:860px;">${esc(graph.positioning || 'Dependency explorer')}</div>
-      <div class="cds--method-row" style="margin-top:0;">
-        <span class="cds--tag cds--tag--blue">${esc(optionNodes)} options/add-ons</span>
-        <span class="cds--tag cds--tag--gray">${esc(dependencyNodes)} dependencies</span>
-        <span class="cds--tag cds--tag--purple">${esc(premiumEdges)} premium-reference paths</span>
+      <div style="font-size:12px; color:var(--cds-text-secondary); max-width:760px;">${esc(graph.positioning || 'Dependency explorer')}</div>
+      <div class="cds--method-row" style="margin-top:0; gap:6px; flex-wrap:wrap;">
+        ${editionLabel ? `<span class="cds--tag cds--tag--blue" title="Active WXD_EDITION">${esc(editionLabel)}</span>` : ''}
+        <span class="cds--tag cds--tag--gray">${esc(nodes.length)} nodes</span>
+        <span class="cds--tag cds--tag--gray">${esc(edges.length)} edges</span>
+        ${premiumEdges ? `<span class="cds--tag cds--tag--purple">${esc(premiumEdges)} premium paths</span>` : ''}
         <button class="cds--raw-link" onclick="openRawInspector(${sourcesIndex})">View graph JSON</button>
       </div>
     </div>
     <div class="cds--neo-layout">
       <div class="cds--neo-canvas">
-        <svg id="dependency-graph-svg" viewBox="0 0 1100 640" role="img" aria-label="Interactive product dependency graph"></svg>
+        <div class="cds--graph-controls">
+          <button class="cds--raw-link" onclick="runDependencyLayout()">Re-layout</button>
+          <button class="cds--raw-link" onclick="fitDependencyGraph()">Fit</button>
+        </div>
+        <div id="dependency-graph-cy" role="img" aria-label="Interactive product dependency graph"></div>
       </div>
       <aside class="cds--neo-side">
         <h3>How to read the graph</h3>
-        <p>Click any node or relationship to open a plain-language impact card here. Solid emphasis lines mark relationships that need special care, such as Premium references or restricted dependency interpretation.</p>
-        <ul>
-          <li>Blue nodes are optional install options or integrated add-ons.</li>
-          <li>Light-blue nodes are dependencies or dependency/product boundary cases.</li>
-          <li>Purple nodes are Premium references, not default entitlement.</li>
-          <li>Green means metering evidence, especially IBM License Service.</li>
-        </ul>
-        <div class="cds--neo-legend">
-          <span><span class="cds--legend-dot" style="background:var(--cds-interactive-01);"></span>option/add-on</span>
-          <span><span class="cds--legend-dot" style="background:var(--cds-support-info);"></span>dependency</span>
-          <span><span class="cds--legend-dot" style="background:var(--cds-interactive-accent);"></span>premium reference</span>
-          <span><span class="cds--legend-dot" style="background:var(--cds-support-success);"></span>metering</span>
+        <p>Only active components shown, filtered by live CRs and <code>WXD_EDITION</code>. Click any node or edge for details.</p>
+        <div class="cds--neo-legend" style="flex-direction:column; gap:6px; margin-top:10px;">
+          <strong style="font-size:11px; color:var(--cds-text-secondary); text-transform:uppercase; letter-spacing:0.5px;">Node shapes</strong>
+          <span><span class="cds--legend-dot" style="background:var(--cds-interactive-01); border-radius:3px;"></span>Core product (rounded rect)</span>
+          <span><span class="cds--legend-dot" style="background:#0e7490;"></span>Integration bundle (hexagon)</span>
+          <span><span class="cds--legend-dot" style="background:#7c3aed; transform:rotate(45deg); border-radius:1px; display:inline-block;"></span>Premium reference (diamond)</span>
+          <span><span class="cds--legend-dot" style="background:var(--cds-layer-02); border:1px solid var(--cds-border-subtle-01);"></span>Platform / metering (barrel)</span>
+          <strong style="font-size:11px; color:var(--cds-text-secondary); text-transform:uppercase; letter-spacing:0.5px; margin-top:6px;">Edge styles</strong>
+          <span><span style="display:inline-block;width:22px;height:3px;background:#0e7490;margin-right:6px;vertical-align:middle;"></span>Bundled as RU — solid teal</span>
+          <span><span style="display:inline-block;width:22px;height:3px;background:var(--cds-interactive-01);margin-right:6px;vertical-align:middle;"></span>Edition uplift — solid blue</span>
+          <span><span style="display:inline-block;width:22px;height:0;border-top:2px dashed #6366f1;margin-right:6px;vertical-align:middle;"></span>Optional / add-on — dashed indigo</span>
+          <span><span style="display:inline-block;width:22px;height:0;border-top:2px dashed #7c3aed;margin-right:6px;vertical-align:middle;"></span>Premium reference — dashed purple</span>
+          <span><span style="display:inline-block;width:22px;height:0;border-top:2px dashed red;margin-right:6px;vertical-align:middle;"></span>Restricted dep — dashed red</span>
+          <span><span style="display:inline-block;width:22px;height:0;border-top:2px dotted var(--cds-border-subtle-01);margin-right:6px;vertical-align:middle;"></span>Platform dep — dotted (unlabelled)</span>
+          <span><span style="display:inline-block;width:22px;height:0;border-top:2px dashed var(--cds-support-success);margin-right:6px;vertical-align:middle;"></span>Metering — dashed green</span>
+          <strong style="font-size:11px; color:var(--cds-text-secondary); text-transform:uppercase; letter-spacing:0.5px; margin-top:6px;">Border</strong>
+          <span><span class="cds--legend-dot" style="background:transparent; border:3px solid var(--cds-support-success);"></span>Thick green = live installed CR</span>
         </div>
         <div id="dependency-detail-panel"></div>
       </aside>
     </div>
     <div class="cds--relationship-list">${relationshipCards}</div>
   `;
+  initDependencyCytoscape(nodeMap, graphEdges);
   showDependencyNode(dependencyExplorerState.selectedId);
 }
 
@@ -3689,6 +4194,21 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"status": "healthy"}')
+        elif parsed.path.startswith("/vendor/"):
+            rel_path = urllib.parse.unquote(parsed.path.removeprefix("/vendor/"))
+            asset_path = os.path.abspath(os.path.join(VENDOR_DIR, rel_path))
+            if not asset_path.startswith(os.path.abspath(VENDOR_DIR) + os.sep) or not os.path.isfile(asset_path):
+                self.send_response(404)
+                self.end_headers()
+                return
+            content_type = "text/javascript; charset=utf-8" if asset_path.endswith(".js") else "application/octet-stream"
+            with open(asset_path, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self.end_headers()
+            self.wfile.write(data)
         else:
             self.send_response(404)
             self.end_headers()
