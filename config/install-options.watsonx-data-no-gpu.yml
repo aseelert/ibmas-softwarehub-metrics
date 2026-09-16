@@ -1,0 +1,36 @@
+---
+# IBM Software Hub 5.3.1 watsonx.data installation options.
+# This is the full watsonx.data service with the documented small scale.
+# GPU operators and GPU-dependent optional services are intentionally omitted.
+#
+# scaleConfig: small_mincpureq
+#
+#   STATUS: Internal operator profile — functional but NOT in IBM public documentation.
+#
+#   This profile exists inside the operator image at:
+#     /opt/ansible/config/scale/small_mincpureq.yaml
+#   and is explicitly handled in the Ansible tasks (ccs_install, spark_install,
+#   ikc_install, watsonx_data_standard_install). It is mentioned by name in the
+#   WxdEngine sample YAML comment as a valid option alongside small/medium/large.
+#
+#   What it does:
+#     - Sets all CPU *requests* to 5m (scheduler sees free headroom on the node)
+#     - All CPU *limits* are identical to 'small' (full burst capacity preserved)
+#     - Required on 3-node clusters (3×32 vCPU) where 'small' req=lim exhausts
+#       all schedulable CPU before all pods can be placed.
+#
+#   Risk:
+#     - Not cited in ibm.com/docs — IBM Support may not recognise it
+#     - Could be renamed/removed in a future operator version without notice
+#     - If removed, operator reconcile will fail with an Ansible file-not-found
+#       error; revert to 'small' as fallback
+#
+#   Alternatives considered:
+#     - scaleConfig: small + manual oc patch (reverted by operator every 30min)
+#     - LimitRange default (does not override explicit requests set by operator)
+#     - WxdEngine CR per-component overrides (Presto only, not Milvus/CAS/MDS)
+#
+non_olm:
+  watsonxData:
+    enable_lite_milvus: false
+    scaleConfig: small_mincpureq
