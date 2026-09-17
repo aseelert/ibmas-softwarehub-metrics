@@ -8,8 +8,10 @@ venv/
 ENV/
 
 # Environment files with sensitive credentials
-# (.env.example is committed, .env contains local cluster tokens)
+# (.env.example is committed; .env holds local cluster tokens/passwords and must never be committed)
+.env
 .env.local
+.env.backup*
 
 # Testing & logs
 .pytest_cache/
