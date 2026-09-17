@@ -24,7 +24,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import subprocess
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, Optional, List
 
 SSL_CTX = ssl.create_default_context()
@@ -135,30 +135,33 @@ IBM_LICENSE_TERMS_INFO = {
         ]
     },
     "watsonx_data_standard": {
-        "doc_id": "IBM watsonx.data 2.3 / 2.4",
+        "doc_id": "IBM watsonx.data 2.3 / 2.4 (base doc L-HHZC-6FEVQJ for v2.4)",
         "name": "IBM watsonx.data standard / non-premium",
         "program_name": "IBM watsonx.data",
-        "metric": "Use IBM License Service metricName as reported: RU, VPC, or contract-specific metric",
+        "metric": "Use IBM License Service metricName as reported: VIRTUAL_PROCESSOR_CORE (VPC) or RESOURCE_UNIT (RU)",
         "terms_highlights": [
-            "Default posture for this dashboard: standard/non-premium watsonx.data.",
+            "Default posture for this dashboard: standard/non-premium watsonx.data. \"A single watsonx.data license is equal to 1 VPC.\"",
             "Do not infer Premium features or Premium license terms from a standard watsonx.data CR.",
-            "Meter by the product metric reported by IBM License Service; do not convert RU to VPC unless the customer's IBM agreement explicitly defines that conversion.",
+            "IBM publishes documented engine conversion ratios — Presto (Java) 1:1, Presto (C++) 1:2, Spark 1:1, base-edition Milvus 3 GPGPU/3VPC/1VPC — read them from IBM License Service's own /bundled_products.metricConversion and metricConvertedQuantity fields rather than re-deriving client-side.",
+            "Core (platform services required by every watsonx.data engine) is a FLAT 20 VPC / 20 CPU / 17GB entitlement floor, not a per-engine scaling ratio — do not sum it as if it scaled 1:1 with engine count.",
+            "Milvus is licensed in BOTH the base and Premium editions, just metered differently (base: flat VPC-denominated ratio; Premium: RU-pool ratio) — it is not a Premium-exclusive feature; do not state otherwise.",
             "Track CR sizing, pod limits, and live CPU/memory as operational evidence, not as a replacement for IBM License Service audit data."
         ],
         "sources": [
             "https://www.ibm.com/support/pages/license-information-ibm-software-hub-53-and-related-services",
             "https://www.ibm.com/support/pages/license-information-ibm-software-hub-54-and-related-services",
-            "https://www.ibm.com/docs/en/software-hub/5.4.x?topic=new-watsonxdata"
+            "https://www.ibm.com/docs/en/software-hub/5.4.x?topic=new-watsonxdata",
+            "https://www.ibm.com/docs/en/watsonxdata/standard/2.1.x?topic=software-licensing-entitlements"
         ]
     },
     "watsonx_data_premium_reference": {
         "doc_id": "L-PCPF-BJV4WW",
-        "name": "IBM watsonx.data Premium Edition 2.4.x reference only",
+        "name": "IBM watsonx.data Premium Edition 2.4.x Update 1 reference only",
         "program_name": "IBM watsonx.data Premium",
         "metric": "Use the License Information document and License Service metricName",
         "terms_highlights": [
             "Premium is a separate IBM offering and must not be assumed for a non-premium installation.",
-            "The example document supplied by the user is for watsonx.data Premium 2.4 update 1.",
+            "L-PCPF-BJV4WW (Program 5900-BQE) is confirmed Active as of 2026-06-24 via IBM's live CSOL system — its full text confirms the Milvus ratio (6 GPGPU/6VPC/1RU), the Databand/watsonx.data-integration scoping language, and the Prohibited-Components clause (\"Licensee is not authorized to use ... IBM Software Hub Premium and IBM Software Hub AI Assistant features\").",
             "Use Premium references only when the customer entitlement and License Service product row identify Premium."
         ],
         "sources": [
@@ -166,19 +169,70 @@ IBM_LICENSE_TERMS_INFO = {
             "https://www.ibm.com/support/pages/license-information-ibm-software-hub-54-and-related-services"
         ]
     },
+    "superseded_license_documents": {
+        "name": "Known-superseded CSOL document IDs — verify before citing",
+        "metric": "IBM's public license-information index pages can lag behind CSOL's live system by months",
+        "terms_highlights": [
+            "As of 2026-09-17: IBM Software Hub Premium Cartridge V5.4 is L-BFHU-57RB3P (Update 1, published 2026-06-24) — the previously-published L-DDRJ-KNN7UL no longer resolves.",
+            "As of 2026-09-17: IBM Software Hub AI Assistant Cartridge V5.4 is L-UMNG-S3KFK8 (Update 1, published 2026-06-24) — the previously-published L-ANNR-GU54BZ no longer resolves.",
+            "The canonical 'worked example' PDFs historically cited for VPC/RU definitions — ibm.com/about/software-licensing/assets/guides_pdf/CloudPaks.pdf and .../Container_Licensing.pdf — both return HTTP 404 as of 2026-09-17. Do not cite them; use the containerfaqov/subcaplicensing pages or a live CSOL document instead.",
+            "Always re-check a document ID against IBM's live CSOL search (ibm.com/support/customer/csol/terms) before presenting it as current — a document that was correct last quarter can be silently superseded."
+        ],
+        "sources": [
+            "https://www.ibm.com/support/customer/csol/terms/?id=L-BFHU-57RB3P",
+            "https://www.ibm.com/support/customer/csol/terms/?id=L-UMNG-S3KFK8",
+            "https://www.ibm.com/support/pages/node/7275162"
+        ]
+    },
+    "entitlement_application_and_node_pinning": {
+        "name": "Applying entitlements and node pinning (cpd-cli manage apply-entitlement)",
+        "metric": "Entitlement application governs which License Service metric rows a component is measured against; node pinning governs which nodes' capacity counts toward which entitlement",
+        "terms_highlights": [
+            "`cpd-cli manage apply-entitlement --cpd_instance_ns=<ns> --entitlement=<value> [--production=false]` tells License Service which purchased entitlement applies to a component before or after install; run it once per solution you plan to install.",
+            "Confirmed current --entitlement values include: cpd-enterprise, cpd-standard, datastage, datastage-plus, ikc-standard, ikc-premium, data-lineage, data-lineage-reserved, watsonx-ai, watsonx-data, watsonx-data-reserved, watsonx-data-premium, watsonx-data-premium-reserved, watsonx-dataintegration, watsonx-dataintegration-reserved, watsonx-dataintelligence / watsonx-dataintelligence-vpc (plus -reserved and -transition variants), watsonx-gov-mm, watsonx-gov-rc, watsonx-orchestrate, cognos-analytics, data-product-hub, openpages, planning-analytics, product-master, watson-discovery, watson-assistant, speech-to-text, text-to-speech, watsonx-code-assistant(-ansible|-z), watsonx-bi-premium(-ca)(-vpc). Append --production=false for non-production entitlements.",
+            "Node pinning (a SEPARATE, optional step) uses node affinity so pods for different solutions land on distinct, labeled nodes — label key isc-entitlement with values chargeable-components / non-chargeable-components / chargeable-gpu-components (`oc label node <name> isc-entitlement=chargeable-components`). It is 'optional but strongly recommended if you plan to install multiple solutions in a single instance' — not required for a single-solution instance.",
+            "Enforcement has two levels: unenforced (default, preferredDuringSchedulingIgnoredDuringExecution — a soft preference) vs. enforced (requiredDuringSchedulingIgnoredDuringExecution — pods won't schedule off-label).",
+            "This dashboard checks live node labels for isc-entitlement and reports whether node pinning is configured — this is a real, checkable compliance-readiness signal, not an inferred one."
+        ],
+        "sources": [
+            "https://www.ibm.com/docs/en/software-hub/5.4.x?topic=entitlements-applying-your-without-node-pinning",
+            "https://www.ibm.com/docs/en/SSNFH6_5.1.x/hub/plan/node-planning.html",
+            "https://www.ibm.com/docs/en/software-hub/5.2.x?topic=manage-apply-entitlement"
+        ]
+    },
+    "container_licensing_rules": {
+        "name": "IBM container licensing: VPC/RU mechanics and compliance obligations",
+        "metric": "Pod vCPU Limit (potential capacity), not runtime usage — measured and reported by IBM License Service",
+        "terms_highlights": [
+            "\"Generally, 1 VPC = 1 physical core or 1 virtual core.\" \"The vCPU capacity of a pod is the sum of the CPU limits for all containers within that pod\" — capped at worker-node capacity and aggregated cluster-wide. \"IBM licenses containers based on their potential capacity rather than actual usage,\" not live utilization.",
+            "\"Any Product that has not been enabled to run and be tracked by IBM License Service will not be eligible for Container Licensing\" — IBM License Service is mandatory, no exceptions, for containerized IBM software on Kubernetes.",
+            "Customers must \"generate and maintain for two years, IBM Use Reports each quarter\" — the audit window is a fixed calendar quarter (first day of the first month through the last day of the last month), not a rolling 90-day lookback.",
+            "New container-licensing customers get a 90-day grace period from first Eligible Container Product deployment to implement IBM License Service.",
+            "Non-compliance consequence: \"Customers who are not in compliance ... will be charged for all cores in the entire cluster\" (full-capacity, not sub-capacity, billing).",
+            "Sub-capacity/ILMT has been mandatory since May 10, 2022 for VM-based VPC licensing (phased cutover: new customers Feb 1 2023, existing customers May 1 2023) — container workloads use License Service instead of ILMT for the equivalent obligation; License Service Reporter can roll up both sources (\"ILMT for VMs, License Service for containers\") across a multi-cluster estate."
+        ],
+        "sources": [
+            "https://www.ibm.com/software/passportadvantage/containerfaqov",
+            "https://www.ibm.com/software/passportadvantage/subcaplicensing",
+            "https://www.ibm.com/docs/en/cloud-paks/foundational-services/4.13.0?topic=license-service-reporter"
+        ]
+    },
     "license_service_api": {
         "name": "IBM License Service API endpoints used by this dashboard",
         "metric": "Reported per endpoint; products are authoritative for product usage",
         "terms_highlights": [
-            "/products returns deployed product license usage and metricName/metricQuantity.",
-            "/bundled_products returns Cloud Pak bundled product usage; keep it separate to avoid double counting.",
-            "/services returns service contribution to products and is useful for drill-down attribution.",
-            "/snapshot produces audit evidence for a reporting period.",
-            "/health and /status explain collector health and API readiness."
+            "/products and /bundled_products return raw JSON ARRAYS (not {\"products\":[...]}-wrapped objects) of metricName/metricQuantity rows — confirmed against a live 4.2.20 instance; a collector that assumes a wrapper object will silently see zero rows.",
+            "metricName is the full ILMT metric code name — VIRTUAL_PROCESSOR_CORE (ILMT metric ID 5844) or RESOURCE_UNIT (ILMT metric ID 10251) — not the short VPC/RU labels this dashboard displays; normalize before aggregating.",
+            "/bundled_products additionally reports metricConversion (e.g. \"3:1\") and metricConvertedQuantity per sub-component — consume these directly instead of re-deriving conversion ratios client-side.",
+            "/services returns service contribution to products and is useful for drill-down attribution (can legitimately be an empty array).",
+            "/status returns an HTML dashboard page, not JSON — link out to it rather than parsing it for data.",
+            "/snapshot returns a signed ZIP archive (CSVs + signature.rsa + pub_key.pem + checksum.txt), not JSON — this is IBM's own audit-evidence package; wire it directly into an export action.",
+            "Authentication is via a Kubernetes ServiceAccount token in the Authorization header (the exact secret name is cluster/version-specific — confirmed working on this cluster: ibm-licensing-default-reader-token in the ibm-licensing namespace) or a ?token= URL parameter (disable-able by policy)."
         ],
         "sources": [
-            "https://www.ibm.com/docs/en/cloud-paks/foundational-services/4.x?topic=pcfls-apis",
-            "https://www.ibm.com/docs/en/cloud-paks/foundational-services/4.x?topic=api-calls-retrieving-license-service-reporter-data"
+            "https://www.ibm.com/docs/en/cloud-paks/foundational-services/3.23?topic=pcfls-apis",
+            "https://www.ibm.com/docs/en/SSRV9V_4.6/license-service/API_authentication.html",
+            "https://www.ibm.com/docs/en/license-metric-tool/9.2.0?topic=v2-metric-ids-code-names"
         ]
     },
     "license_document_cli": {
@@ -188,12 +242,13 @@ IBM_LICENSE_TERMS_INFO = {
             "cpd-cli manage get-license returns license URLs for a Software Hub release and can be scoped by component/license type.",
             "Use get-license during planning and entitlement review to confirm which license documents apply.",
             "Use IBM License Service products/bundled_products for live usage quantities.",
-            "This dashboard keeps those two evidence streams separate: terms documents explain entitlement, License Service explains measured use."
+            "This dashboard keeps those two evidence streams separate: terms documents explain entitlement, License Service explains measured use.",
+            "Caveat: IBM's software-hub doc URLs are not stable across point releases — the 5.3.x apply-entitlement topic returns HTTP 403 today while the equivalent 5.2.x page works; verify each 5.4.x URL individually (or fall back a version) before relying on it."
         ],
         "sources": [
             "https://www.ibm.com/docs/en/software-hub/5.4.x?topic=manage-get-license",
             "https://www.ibm.com/docs/en/software-hub/5.4.x?topic=planning-licenses-entitlements",
-            "https://www.ibm.com/docs/en/software-hub/5.4.x?topic=entitlements-licensing-guidance-enterprise-edition"
+            "https://www.ibm.com/docs/en/software-hub/5.2.x?topic=manage-apply-entitlement"
         ]
     },
     "tracking_reporting_policy": {
@@ -203,11 +258,13 @@ IBM_LICENSE_TERMS_INFO = {
             "IBM states that License Service measures Software Hub use against license terms.",
             "When services are added, apply-entitlement might need to be rerun if the service is not covered by an existing license.",
             "When services are removed, remove-entitlement should only be run when no remaining service uses that license.",
-            "This dashboard therefore separates selected services, installed dependencies, applied entitlements, and measured License Service output."
+            "The audit/reporting window is a fixed calendar quarter, not a rolling lookback window — see container_licensing_rules.",
+            "This dashboard therefore separates selected services, installed dependencies, applied entitlements, and measured License Service output.",
+            "Caveat: verify each 5.4.x doc URL individually before relying on it — see license_document_cli's caveat about unstable point-release URLs."
         ],
         "sources": [
             "https://www.ibm.com/docs/en/software-hub/5.4.x?topic=1-tracking-reporting-use-against-license-terms",
-            "https://www.ibm.com/docs/en/software-hub/5.4.x?topic=puish-applying-your-entitlements-1"
+            "https://www.ibm.com/docs/en/software-hub/5.4.x?topic=entitlements-applying-your-without-node-pinning"
         ]
     }
 }
@@ -471,37 +528,46 @@ DEPENDENCY_EXPLORER_CATALOG = {
 KNOWN_SERVICES_CATALOG = {
     "watsonx_data": {
         "name": "IBM watsonx.data",
-        "cr_kind": "WatsonxData",
-        "cr_group": "watsonxdata.cpd.ibm.com",
+        "cr_kind": "Wxd",
+        "cr_group": "watsonxdata.ibm.com",
+        "cr_plural": "wxds.watsonxdata.ibm.com",
+        "sibling_crds": ["wxdengines.watsonxdata.ibm.com (kind WxdEngine — Presto/Milvus/Spark engine instances)", "wxdaddons.watsonxdata.ibm.com (kind WxdAddon)"],
+        "verified": "Confirmed live via `oc get crd` on a running Software Hub 5.4 cluster, 2026-09-17. Not documented in any public IBM CRD reference found; re-verify per cluster/version.",
         "category": "Lakehouse & Query Engine",
         "tier": "Core Service",
         "edition_options": ["Standard / non-premium", "Premium only when IBM entitlement says Premium"],
-        "license_rule": "Default dashboard assumption: watsonx.data standard/non-premium. Use IBM License Service metricName and metricQuantity exactly as reported; do not label this Premium unless the installed entitlement row says Premium.",
-        "dependencies": ["ccs", "zen", "opencontent_opensearch"],
+        "license_rule": "Default dashboard assumption: watsonx.data standard/non-premium. IBM publishes documented engine conversion ratios (Presto Java 1:1, Presto C++ 1:2, Spark 1:1, Milvus base 3 GPGPU/3VPC/1VPC, Milvus Premium 6 GPGPU/6VPC/1RU) — read IBM License Service's own /bundled_products.metricConversion and metricConvertedQuantity rather than re-deriving these client-side. Core (platform services required by every engine) is a flat 20 VPC / 20 CPU / 17GB entitlement floor, not a scaling per-unit consumer — do not sum it as if it scaled 1:1 with engine count. Do not label this Premium unless the installed entitlement row says Premium.",
+        "dependencies": ["ccs", "zen", "opencontent_opensearch", "analyticsengine"],
         "default_limit_vpc": 48,
         "default_scale": "small_mincpureq",
-        "pod_regex": "ibm-lh-.*|wxd-.*|presto-.*|lakehouse-.*",
-        "desc": "Open lakehouse service. CR sizing and pod limits are operational indicators; IBM License Service is the metering source."
+        "pod_regex": "ibm-lh-.*|ibm-lh-postgres-.*|lhconsole-.*|lhingest-.*|milvus[0-9]*-.*|presto[0-9]*-.*",
+        "desc": "Open lakehouse service (Presto/Iceberg query engines, MinIO/COS, optional Milvus vector DB). CR sizing and pod limits are operational indicators; IBM License Service is the metering source."
     },
     "wkc": {
         "name": "IBM Knowledge Catalog (WKC)",
         "cr_kind": "WKC",
         "cr_group": "wkc.cpd.ibm.com",
+        "cr_plural": "wkc.wkc.cpd.ibm.com",
+        "sub_components": ["Knowledgegraph", "DataQuality", "Enrichment", "Finley", "Glossary", "MetadataImports", "Policy", "Profiling", "Workflow", "Wkcgovui"],
+        "verified": "Group confirmed live via `oc get crd`, 2026-09-17. Note: the CRD's plural repeats the group (wkc.wkc.cpd.ibm.com) — `oc get wkc.cpd.ibm.com` fails, must be `oc get wkc.wkc.cpd.ibm.com`. WKC installs 10 further CRDs under the same wkc.cpd.ibm.com/v1beta1 group, each its own CR instance, all rolled into one WKC license row.",
         "category": "Governance & Quality",
         "tier": "Core Service",
         "edition_options": ["Knowledge Catalog", "Knowledge Catalog Standard", "Knowledge Catalog Premium only when explicitly entitled"],
-        "license_rule": "Display the installed service as IBM Knowledge Catalog unless IBM License Service reports a Standard or Premium cartridge product row. Premium/model-driven capabilities are separate and involve enableModelsOn: gpu/remote/cpu options. DataStage is only a dependency when enableDataQuality: true — do not list it as an unconditional dependency.",
+        "license_rule": "Display the installed service as IBM Knowledge Catalog unless IBM License Service reports a Standard or Premium cartridge product row. Premium/model-driven capabilities are separate and involve enableModelsOn: gpu/remote/cpu options. DataStage is only a dependency when enableDataQuality: true — do not list it as an unconditional dependency. VPC standalone; RU only when bundled in an edition with WXD_EDITION=WXD_INTELLIGENCE (no separate VPC row then).",
         "dependencies": ["ccs", "zen", "opencontent_opensearch"],
         "conditional_dependencies": {"enableDataQuality": "datastage"},
         "default_limit_vpc": 28,
         "default_scale": "small",
-        "pod_regex": "wkc-.*|wdp-.*|glossary-.*|curation-.*",
+        "pod_regex": "wkc-.*|wdp-.*|metadata-discovery-.*|knowledge-accelerators-.*|finley-public-.*|ikc-.*-postgres-.*",
         "desc": "Automated data discovery, data quality evaluation rules, policy enforcement, and business glossary."
     },
     "datastage": {
         "name": "IBM DataStage Enterprise Cartridge",
         "cr_kind": "DataStage",
-        "cr_group": "datastage.cpd.ibm.com",
+        "cr_group": "ds.cpd.ibm.com",
+        "cr_plural": "datastages.ds.cpd.ibm.com",
+        "sibling_crds": ["pxruntimes.ds.cpd.ibm.com (kind PXRuntime — the compute-heavy parallel engine, tracked separately from the DataStage CR itself)"],
+        "verified": "Group confirmed both live (`oc get crd`) and in IBM docs: https://www.ibm.com/docs/en/software-hub/5.1.x?topic=troubleshooting-datastage shows apiVersion ds.cpd.ibm.com/v1, kind PXRuntime.",
         "category": "Data Integration",
         "tier": "Core / Cartridge",
         "edition_options": [
@@ -510,11 +576,11 @@ KNOWN_SERVICES_CATALOG = {
             "WXD_INTEGRATION bundle — metered as RU, no separate VPC row",
             "WXD_INTELLIGENCE bundle — metered as RU, no separate VPC row"
         ],
-        "license_rule": "Metric depends on deployment context: (1) Standalone Enterprise Cartridge → VPC. (2) WKC data quality only → VPC but restricted to DQ workloads; not a standalone ETL license. (3) Bundled in watsonx.data integration or intelligence (WXD_EDITION=WXD_INTEGRATION/WXD_INTELLIGENCE) → RU, no separate VPC row emitted by License Service. Check WXD_EDITION and the License Service metricName before displaying.",
+        "license_rule": "Metric depends on deployment context: (1) Standalone Enterprise Cartridge → VPC (--entitlement=datastage per cpd-cli manage apply-entitlement). (2) WKC data quality only → VPC but restricted to DQ workloads; not a standalone ETL license. (3) Bundled in watsonx.data integration or intelligence (WXD_EDITION=WXD_INTEGRATION/WXD_INTELLIGENCE) → RU, no separate VPC row emitted by License Service. Check WXD_EDITION and the License Service metricName before displaying.",
         "dependencies": ["ccs", "zen"],
         "default_limit_vpc": 24,
         "default_scale": "small",
-        "pod_regex": "datastage.*|ibm-cpd-datastage.*|px-runtime.*|px-compute.*",
+        "pod_regex": "datastage-ibm-datastage-.*|ds-px-.*-ibm-datastage-.*|.*-ibm-datastage-px-(compute|runtime)-.*",
         "desc": "Parallel data pipelines, ETL transformation runtime, and high-performance PX compute cluster."
     },
     "lineage": {
@@ -527,35 +593,43 @@ KNOWN_SERVICES_CATALOG = {
             "Standalone (VPC) — requires WKC, IKC Standard, or IKC Premium",
             "WXD_INTELLIGENCE bundle — metered as RU, no separate VPC row"
         ],
-        "license_rule": "Standalone MANTA/Data Lineage → VPC; requires a Knowledge Catalog family parent (WKC, IKC Standard, or IKC Premium). When bundled in watsonx.data intelligence (WXD_EDITION=WXD_INTELLIGENCE) → RU, no separate VPC row. Use License Service metricName as the authority.",
+        "license_rule": "Standalone MANTA/Data Lineage → VPC; requires a Knowledge Catalog family parent (WKC, IKC Standard, or IKC Premium). When bundled in watsonx.data intelligence (WXD_EDITION=WXD_INTELLIGENCE) → RU, no separate VPC row. Use License Service metricName as the authority. Note: WKC also ships its own built-in lineage view (wdp-lineage pod, part of the WKC pod set) — that is a distinct capability from this standalone MANTA/DataLineage CR; do not conflate the two when attributing pods.",
         "dependencies": ["ccs", "zen"],
         "optional_parent": ["wkc", "ikc_standard", "ikc_premium"],
         "default_limit_vpc": 16,
         "default_scale": "small",
-        "pod_regex": "manta-.*|lineage-.*|metadata-asset-.*",
+        "cr_group": "cpd.ibm.com",
+        "cr_kind": "DataLineage",
+        "cr_plural": "datalineage.cpd.ibm.com",
+        "verified": "Confirmed live via `oc get crd`, 2026-09-17 (apiVersion cpd.ibm.com/v1beta1, instance name datalineage-cr). Not corroborated by a public IBM doc found in this pass.",
+        "pod_regex": "lineage-scanner-.*|lineage-service-.*|lineage-worker-.*|lineage-ui-.*",
         "desc": "End-to-end automated graph parsing, scanner jobs, and column-level historical data lineage."
     },
     "analyticsengine": {
         "name": "IBM Analytics Engine (Apache Spark)",
         "cr_kind": "AnalyticsEngine",
-        "cr_group": "analyticsengine.cpd.ibm.com",
+        "cr_group": "ae.cpd.ibm.com",
+        "cr_plural": "analyticsengines.ae.cpd.ibm.com",
+        "verified": "Group confirmed live via `oc get crd`, 2026-09-17 (server.py previously guessed analyticsengine.cpd.ibm.com — wrong group).",
         "category": "Analytics Compute",
         "tier": "Compute Engine",
         "edition_options": [
             "Serverless Spark — standalone (VPC)",
             "WXD_INTELLIGENCE bundle — metered as RU, no separate VPC row"
         ],
-        "license_rule": "Standalone Analytics Engine → VPC. Auto-installed as dependency of WKC, watsonx.data, Data Product Hub, and others. When bundled in watsonx.data intelligence (WXD_EDITION=WXD_INTELLIGENCE) → RU. Count only if IBM License Service reports a product or bundled-product row; otherwise treat as operational dependency.",
+        "license_rule": "Standalone Analytics Engine → VPC. Auto-installed as dependency of WKC, watsonx.data, Data Product Hub, and others. When bundled in watsonx.data intelligence (WXD_EDITION=WXD_INTELLIGENCE) → RU. Count only if IBM License Service reports a product or bundled-product row; otherwise treat as operational dependency. IBM License Service /bundled_products reports Spark's native RESOURCE_UNIT measurement converted 1:1 to VIRTUAL_PROCESSOR_CORE.",
         "dependencies": ["ccs", "zen"],
         "default_limit_vpc": 16,
         "default_scale": "small",
-        "pod_regex": "spark-.*|analyticsengine-.*|iae-.*",
+        "pod_regex": "spark-hb-.*",
         "desc": "Serverless Apache Spark kernel pools and distributed compute executor instances."
     },
     "ccs": {
         "name": "Common Core Services (CCS)",
-        "cr_kind": "CommonCoreServices",
+        "cr_kind": "CCS",
         "cr_group": "ccs.cpd.ibm.com",
+        "cr_plural": "ccs.ccs.cpd.ibm.com",
+        "verified": "Group confirmed live via `oc get crd`, 2026-09-17; kind corrected from a previously-guessed 'CommonCoreServices' to the real 'CCS'. Plural repeats the group (ccs.ccs.cpd.ibm.com) — `oc get ccs.cpd.ibm.com` fails, must be `oc get ccs.ccs.cpd.ibm.com`.",
         "category": "Platform Foundation",
         "tier": "Foundational Dependency",
         "edition_options": ["Included with Platform"],
@@ -563,13 +637,15 @@ KNOWN_SERVICES_CATALOG = {
         "dependencies": ["zen"],
         "default_limit_vpc": 8,
         "default_scale": "small",
-        "pod_regex": "ccs-.*|connections-.*|flight-.*",
+        "pod_regex": "ccs-cams-postgres-.*|ccs-jobs-postgres-.*|ccs-post-install-job-.*",
         "desc": "Universal data connectivity, Arrow Flight transport, collaborative project workspaces, and catalog asset previews."
     },
     "opencontent_opensearch": {
         "name": "IBM OpenContent OpenSearch",
-        "cr_kind": "OpenSearchCluster",
-        "cr_group": "opensearch.cpd.ibm.com",
+        "cr_kind": "Cluster",
+        "cr_group": "opensearch.cloudpackopen.ibm.com",
+        "cr_plural": "clusters.opensearch.cloudpackopen.ibm.com",
+        "verified": "Group and kind corrected via live `oc get crd`, 2026-09-17 — previously guessed as 'OpenSearchCluster'/'opensearch.cpd.ibm.com', both wrong. Live instance observed: elasticsearch-master. A second, newer opensearch218-* pod set was also observed on this cluster but its owning CR was not identified in this pass (candidate: managed by the watsonx.data WxdAddon CR) — do not attribute it to this service until confirmed via ownerReferences.",
         "category": "Search & Indexing",
         "tier": "Platform Foundation",
         "edition_options": ["Included with Platform"],
@@ -577,13 +653,15 @@ KNOWN_SERVICES_CATALOG = {
         "dependencies": [],
         "default_limit_vpc": 8,
         "default_scale": "small",
-        "pod_regex": "opencontent-opensearch-.*|opensearch-.*",
+        "pod_regex": "elasticsearch-master-esnodes-.*|elasticsearch-master-snapshot-.*",
         "desc": "Distributed search and analytics engine for platform metadata, asset indexing, and audit logging."
     },
     "zen": {
         "name": "IBM Software Hub Control Plane (Zen)",
         "cr_kind": "ZenService",
         "cr_group": "zen.cpd.ibm.com",
+        "cr_plural": "zenservices.zen.cpd.ibm.com",
+        "verified": "Confirmed both live (`oc get crd`) and in IBM docs: https://www.ibm.com/support/pages/how-troubleshoot-when-zenservice-upgrade-stuck-71 shows apiVersion zen.cpd.ibm.com/v1, kind ZenService. The only KNOWN_SERVICES_CATALOG entry that was already fully correct.",
         "category": "Platform Foundation",
         "tier": "Platform Foundation",
         "edition_options": ["Software Hub Core"],
@@ -591,8 +669,40 @@ KNOWN_SERVICES_CATALOG = {
         "dependencies": [],
         "default_limit_vpc": 6,
         "default_scale": "small",
-        "pod_regex": "zen-.*|ibm-nginx-.*|usermgmt-.*",
+        "pod_regex": "zen-core-.*|zen-audit-.*|zen-watchdog-.*|zen-watcher-.*|zen-minio-.*|zen-metastore-.*|ibm-nginx-.*|common-web-ui-.*|platform-auth-service-.*|platform-identity-.*|usermgmt-.*|cpd-mgmt-server-.*",
         "desc": "Core control plane, unified experience UI, security gateway, and user management."
+    },
+    "datastage_px": {
+        "name": "IBM DataStage PX Runtime",
+        "cr_kind": "PXRuntime",
+        "cr_group": "ds.cpd.ibm.com",
+        "cr_plural": "pxruntimes.ds.cpd.ibm.com",
+        "verified": "Confirmed live via `oc get crd`, 2026-09-17 and in IBM docs (https://www.ibm.com/docs/en/software-hub/5.1.x?topic=troubleshooting-datastage). Not previously tracked at all in this catalog — a separate CRD from the DataStage CR itself, driving the compute-heavy parallel engine pods.",
+        "category": "Data Integration",
+        "tier": "Compute Engine",
+        "edition_options": ["Bundled with DataStage Enterprise entitlement — not separately licensed"],
+        "license_rule": "PXRuntime is the parallel-engine compute layer for DataStage; it is covered by the parent DataStage Enterprise entitlement (see datastage), not a separate License Service product row.",
+        "dependencies": ["datastage"],
+        "default_limit_vpc": 0,
+        "default_scale": "small",
+        "pod_regex": ".*-ibm-datastage-px-(compute|runtime)-.*",
+        "desc": "High-performance parallel execution (PX) compute cluster underlying DataStage Enterprise pipelines."
+    },
+    "datarefinery": {
+        "name": "IBM Data Refinery",
+        "cr_kind": "DataRefinery",
+        "cr_group": "datarefinery.cpd.ibm.com",
+        "cr_plural": "datarefinery.datarefinery.cpd.ibm.com",
+        "verified": "Confirmed live via `oc get crd`, 2026-09-17. Previously listed in SUPPORTED_SERVICES_CATALOG with no cr_kind/cr_group at all.",
+        "category": "Data Preparation",
+        "tier": "Dependency",
+        "edition_options": ["Auto-installed dependency of Watson Studio and WKC"],
+        "license_rule": "Do not usually specify directly; parent services (Watson Studio, WKC) install/upgrade it. Count only if IBM License Service reports a standalone product row.",
+        "dependencies": ["ccs", "zen"],
+        "default_limit_vpc": 8,
+        "default_scale": "small",
+        "pod_regex": "datarefinery-.*",
+        "desc": "Interactive, visual data preparation and shaping used by Watson Studio and WKC."
     }
 }
 
@@ -604,6 +714,18 @@ class ClusterTelemetryCollector:
         self.namespace_license = os.environ.get("PROJECT_LICENSE_SERVICE", "ibm-licensing")
         self.namespace_cpd = os.environ.get("PROJECT_CPD_INST_OPERANDS", "cpd-instance")
         self.custom_services: Dict[str, Any] = {}
+        # See get_oc_token: without this cache, a single page render (which calls
+        # get_oc_token once per per-service Prometheus query — up to ~40 times for 10
+        # services) reran `oc login` on every single call. Measured live: that made
+        # concurrent polls pile up dozens of `oc login` subprocesses and turned a single
+        # /api/telemetry request into a 60+ second hang.
+        self._oc_logged_in = False
+        self._oc_token_cache: Optional[str] = None
+        self._oc_token_cache_time: float = 0.0
+        self._license_token_cache: Optional[str] = None
+        self._license_token_cache_time: float = 0.0
+        self._license_host_cache: Optional[str] = None
+        self._license_host_cache_time: float = 0.0
 
     def run_cmd(self, cmd_args: List[str]) -> Optional[str]:
         try:
@@ -619,23 +741,66 @@ class ClusterTelemetryCollector:
         token = os.environ.get("OCP_TOKEN")
         if token:
             return token
-        # Priority 2: username + password — perform 'oc login' automatically
+        # Short-lived cache: one real page render calls this many times in quick succession
+        # (once per service per Prometheus metric) — there is no need to re-login or even
+        # re-run `oc whoami -t` that often.
+        now = time.time()
+        if self._oc_token_cache and (now - self._oc_token_cache_time) < 30:
+            return self._oc_token_cache
+        # Priority 2: username + password — perform 'oc login' automatically, but only once
+        # per process; the kubeconfig session it creates persists for later `oc whoami -t`
+        # calls, so repeating the login on every call was pure waste (and, under concurrent
+        # requests, a pile-up of redundant login subprocesses).
         user = os.environ.get("OCP_USER")
         password = os.environ.get("OCP_PASSWORD")
         ocp_url = os.environ.get("OCP_URL")
-        if user and password and ocp_url:
+        if user and password and ocp_url and not self._oc_logged_in:
             self.run_cmd([
                 "oc", "login", ocp_url,
                 "-u", user, "-p", password,
                 "--insecure-skip-tls-verify=true"
             ])
+            self._oc_logged_in = True
         # Priority 3: active oc session
-        return self.run_cmd(["oc", "whoami", "-t"])
+        token = self.run_cmd(["oc", "whoami", "-t"])
+        if token:
+            self._oc_token_cache = token
+            self._oc_token_cache_time = now
+        return token
+
+    # IBM License Service reports metricName as the full ILMT metric code name (confirmed
+    # live: "VIRTUAL_PROCESSOR_CORE", "RESOURCE_UNIT" — matching ILMT metric IDs 5844/10251,
+    # https://www.ibm.com/docs/en/license-metric-tool/9.2.0?topic=v2-metric-ids-code-names),
+    # not the short "VPC"/"RU" labels this dashboard displays. Normalize for aggregation while
+    # keeping the original metricName on each row for display.
+    LICENSE_METRIC_ALIASES = {
+        "VIRTUAL_PROCESSOR_CORE": "VPC",
+        "VPC": "VPC",
+        "RESOURCE_UNIT": "RU",
+        "RU": "RU",
+    }
+
+    @staticmethod
+    def _as_rows(data: Any, *wrapper_keys: str) -> List[Dict[str, Any]]:
+        """IBM License Service returns /products, /bundled_products, /services as raw JSON
+        arrays (confirmed live) — not wrapped in {"products": [...]}. Accept both shapes so a
+        future API version that does wrap the array still works."""
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for key in wrapper_keys:
+                value = data.get(key)
+                if isinstance(value, list):
+                    return value
+        return []
+
+    def normalize_metric_name(self, raw_name: str) -> str:
+        return self.LICENSE_METRIC_ALIASES.get(str(raw_name or "").upper(), str(raw_name or "UNKNOWN").upper())
 
     def aggregate_license_metrics(self, products: List[Dict[str, Any]]) -> Dict[str, float]:
         totals: Dict[str, float] = {}
         for product in products:
-            metric = str(product.get("metricName") or product.get("metric") or "UNKNOWN").upper()
+            metric = self.normalize_metric_name(product.get("metricName") or product.get("metric"))
             try:
                 quantity = float(product.get("metricQuantity", product.get("quantity", 0)) or 0)
             except (TypeError, ValueError):
@@ -644,10 +809,15 @@ class ClusterTelemetryCollector:
         return totals
 
     def call_license_api(self, host: str, token: str, endpoint: str) -> Dict[str, Any]:
+        # Live-tested 2026-09-17 against a real 4.2.20 instance: the `?token=` URL-parameter
+        # method (IBM's own docs mention as one of two supported methods, disable-able by
+        # policy) returned 401 for a ServiceAccount reader token; `Authorization: Bearer`
+        # worked immediately. Send both so this also works against a deployment configured for
+        # the URL-param method with a different kind of token.
         url = f"https://{host}/{endpoint}?token={urllib.parse.quote(token)}"
         started = time.time()
         try:
-            req = urllib.request.Request(url)
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
             with urllib.request.urlopen(req, context=SSL_CTX, timeout=8) as resp:
                 body = resp.read()
                 content_type = resp.headers.get("Content-Type", "")
@@ -680,8 +850,13 @@ class ClusterTelemetryCollector:
         discovered = {}
         for svc_id, defn in KNOWN_SERVICES_CATALOG.items():
             kind = defn["cr_kind"]
+            # Prefer the fully-qualified <plural>.<group> resource name (verified against a
+            # live cluster, see KNOWN_SERVICES_CATALOG["verified"]) so the lookup is unambiguous
+            # even when another CRD elsewhere in the cluster happens to share a bare kind name.
+            # ibmlicensing is cluster-scoped (no namespace), everything else here is namespaced.
+            resource_ref = defn.get("cr_plural") or kind.lower()
             cr_json_str = self.run_cmd([
-                "oc", "get", kind.lower(), "-n", self.namespace_cpd, "-o", "json"
+                "oc", "get", resource_ref, "-n", self.namespace_cpd, "-o", "json"
             ])
             if cr_json_str:
                 try:
@@ -731,17 +906,62 @@ class ClusterTelemetryCollector:
 
         return discovered
 
-    def get_license_service_data(self) -> Dict[str, Any]:
+    def get_license_service_token(self) -> Optional[str]:
+        """Live-cluster testing (2026-09-17) found the plain OAuth token from `oc whoami -t`
+        gets 401 on every License Service endpoint except /version, and a secret literally
+        named `ibm-licensing-token` also 401s. The token that actually authorizes read access
+        is the Kubernetes ServiceAccount token in secret `ibm-licensing-default-reader-token`.
+        IBM's docs confirm the auth *mechanism* (a service-account-token via the Authorization
+        header) but not this exact secret name, so try it first, keep the older name as a
+        fallback for clusters/versions that differ, and allow an explicit override for anyone
+        who has already decoded a token by hand."""
+        override = os.environ.get("LICENSE_SERVICE_TOKEN")
+        if override:
+            return override
+        now = time.time()
+        if self._license_token_cache and (now - self._license_token_cache_time) < 30:
+            return self._license_token_cache
+        for secret_name in ("ibm-licensing-default-reader-token", "ibm-licensing-token"):
+            token_b64 = self.run_cmd([
+                "oc", "get", "secret", secret_name,
+                "-n", self.namespace_license, "-o", "jsonpath={.data.token}"
+            ])
+            if token_b64:
+                try:
+                    token = base64.b64decode(token_b64).decode("utf-8")
+                    self._license_token_cache = token
+                    self._license_token_cache_time = now
+                    return token
+                except Exception:
+                    continue
+        return None
+
+    def get_license_service_host(self) -> Optional[str]:
+        """Prefer an explicit override for environments where the cluster's `apps.*` wildcard
+        route domain isn't resolvable from wherever this dashboard runs (a real, confirmed
+        network-scoping issue distinct from the API server's `api.*` hostname) — e.g. point
+        LICENSE_SERVICE_HOST at `localhost:<port>` behind `oc port-forward -n <ns>
+        svc/ibm-licensing-service-instance <port>:8080`."""
+        override = os.environ.get("LICENSE_SERVICE_HOST")
+        if override:
+            return override
+        now = time.time()
+        if self._license_host_cache and (now - self._license_host_cache_time) < 300:
+            return self._license_host_cache
         host = self.run_cmd([
             "oc", "get", "route", "ibm-licensing-service-instance",
             "-n", self.namespace_license, "-o", "jsonpath={.spec.host}"
         ])
-        token_b64 = self.run_cmd([
-            "oc", "get", "secret", "ibm-licensing-token",
-            "-n", self.namespace_license, "-o", "jsonpath={.data.token}"
-        ])
+        if host:
+            self._license_host_cache = host
+            self._license_host_cache_time = now
+        return host
 
-        if not host or not token_b64:
+    def get_license_service_data(self) -> Dict[str, Any]:
+        host = self.get_license_service_host()
+        token = self.get_license_service_token()
+
+        if not host or not token:
             wxd_edition = os.environ.get("WXD_EDITION", "").upper()
             # Base row — always present for any watsonx.data deployment
             products = [
@@ -783,7 +1003,9 @@ class ClusterTelemetryCollector:
                 "totalRu": metric_totals.get("RU", 0.0),
                 "clusterPeakVpc": float(os.environ.get("IBM_VPC_ENTITLEMENT", "128")),
                 "ruEntitlement": float(os.environ.get("IBM_RU_ENTITLEMENT", "1000")),
-                "retentionDays": 90,
+                "latestPeakDate": None,
+                "reportingWindow": "calendar quarter",
+                "auditRetentionYears": 2,
                 "auditReady": False,
                 "apiCoverage": [
                     {
@@ -832,19 +1054,25 @@ class ClusterTelemetryCollector:
             }
 
         try:
-            token = base64.b64decode(token_b64).decode("utf-8")
             calls = {
                 endpoint: self.call_license_api(host, token, endpoint)
                 for endpoint in ["products", "bundled_products", "services", "health", "status"]
             }
-            products_data = calls["products"].get("data") if calls["products"]["status"] == "ok" else {}
-            bundles_data = calls["bundled_products"].get("data") if calls["bundled_products"]["status"] == "ok" else {}
-            services_data = calls["services"].get("data") if calls["services"]["status"] == "ok" else {}
+            products_data = calls["products"].get("data") if calls["products"]["status"] == "ok" else []
+            bundles_data = calls["bundled_products"].get("data") if calls["bundled_products"]["status"] == "ok" else []
+            services_data = calls["services"].get("data") if calls["services"]["status"] == "ok" else []
 
-            products = products_data.get("products", []) if isinstance(products_data, dict) else []
-            bundled_products = bundles_data.get("products", []) if isinstance(bundles_data, dict) else []
-            service_contributions = services_data.get("services", []) if isinstance(services_data, dict) else []
+            # IBM License Service returns these three as raw JSON arrays, not
+            # {"products": [...]}-wrapped objects (confirmed against a live 4.2.20 instance) —
+            # see _as_rows for why this must accept both shapes.
+            products = self._as_rows(products_data, "products")
+            bundled_products = self._as_rows(bundles_data, "products", "bundledProducts")
+            service_contributions = self._as_rows(services_data, "services")
+            for product in products:
+                product["metricNameNormalized"] = self.normalize_metric_name(product.get("metricName"))
             metric_totals = self.aggregate_license_metrics(products)
+            peak_dates = [p.get("metricPeakDate") for p in products if p.get("metricPeakDate")]
+            latest_peak_date = max(peak_dates) if peak_dates else None
             api_coverage = [
                 {k: v for k, v in call.items() if k != "data"} | {
                     "meaning": meaning,
@@ -867,16 +1095,29 @@ class ClusterTelemetryCollector:
                         "method": "GET",
                         "path": "/snapshot",
                         "status": "available",
-                        "meaning": "Use with start_date/end_date for signed audit evidence.",
-                        "data": {"request": {"method": "GET", "path": "/snapshot", "query": {"start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD"}}},
-                    }, "Signed audit evidence package."),
+                        "meaning": "Returns a signed ZIP (not JSON) containing products/bundled_products CSVs, signature.rsa, pub_key.pem, and checksum.txt — the same audit package IBM License Service uploads for compliance reporting. Fetched on demand by the Export Audit Package action, not on every poll.",
+                        "data": {"request": {"method": "GET", "path": "/snapshot", "query": {"startDate": "YYYY-MM-DD", "endDate": "YYYY-MM-DD"}}},
+                    }, "Signed audit evidence ZIP package."),
                     (calls["health"], "License Service health."),
                     (calls["status"], "License Service status page/API readiness."),
                 ]
             ]
+            # Resolving host+token does not mean the API is actually reachable — e.g. this
+            # cluster's apps.* wildcard route domain was unresolvable from outside the cluster
+            # network in testing even though the api.* apiserver hostname worked fine. Report
+            # that honestly instead of claiming "connected" when every call errored.
+            any_call_ok = any(calls[e]["status"] == "ok" for e in ("products", "bundled_products", "services", "health"))
+            if any_call_ok:
+                status, mode = "connected", "Live IBM License Service API"
+            else:
+                status, mode = "unreachable", (
+                    "Host and token resolved but every API call failed — likely a network-reachability "
+                    "issue (e.g. the apps.* route domain isn't resolvable from here). Try setting "
+                    "LICENSE_SERVICE_HOST to a `oc port-forward`-ed localhost:<port> instead."
+                )
             return {
-                "status": "connected",
-                "mode": "Live IBM License Service API",
+                "status": status,
+                "mode": mode,
                 "host": host,
                 "products": products,
                 "bundledProducts": bundled_products,
@@ -886,7 +1127,9 @@ class ClusterTelemetryCollector:
                 "totalRu": metric_totals.get("RU", 0.0),
                 "clusterPeakVpc": float(os.environ.get("IBM_VPC_ENTITLEMENT", "128")),
                 "ruEntitlement": float(os.environ.get("IBM_RU_ENTITLEMENT", "1000")),
-                "retentionDays": 90,
+                "latestPeakDate": latest_peak_date,
+                "reportingWindow": "calendar quarter",
+                "auditRetentionYears": 2,
                 "auditReady": calls["products"]["status"] == "ok",
                 "apiCoverage": api_coverage
             }
@@ -909,8 +1152,28 @@ class ClusterTelemetryCollector:
                 ]
             }
 
+    def fetch_license_snapshot(self) -> Dict[str, Any]:
+        """Fetches the real IBM License Service /snapshot audit package (a signed ZIP, not
+        JSON — see get_license_service_data) on demand. Not called on every telemetry poll:
+        only invoked by the Export Audit Package action, since it's a heavier binary payload."""
+        host = self.get_license_service_host()
+        token = self.get_license_service_token()
+        if not host or not token:
+            return {"status": "unavailable", "reason": "License Service host/token not resolved — connect to a live cluster to export the IBM-signed package."}
+        url = f"https://{host}/snapshot?token={urllib.parse.quote(token)}"
+        try:
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(req, context=SSL_CTX, timeout=20) as resp:
+                body = resp.read()
+                return {"status": "ok", "bytes": body, "contentType": resp.headers.get("Content-Type", "application/zip")}
+        except Exception as exc:
+            return {"status": "error", "reason": str(exc)}
+
     def query_prometheus(self, query: str) -> Optional[Any]:
-        thanos_host = self.run_cmd([
+        # Same apps.* wildcard DNS reachability issue as the License Service route can apply
+        # here — allow the same override pattern (e.g. `oc port-forward -n openshift-monitoring
+        # svc/thanos-querier <port>:9091` and THANOS_HOST=localhost:<port>).
+        thanos_host = os.environ.get("THANOS_HOST") or self.run_cmd([
             "oc", "get", "route", "thanos-querier",
             "-n", "openshift-monitoring", "-o", "jsonpath={.spec.host}"
         ])
@@ -1019,7 +1282,10 @@ class ClusterTelemetryCollector:
                 **item,
                 "local_id": local_id,
                 "installed": installed,
-                "pod_regex": item.get("pod_regex") or component_id.replace("-", "_") + ".*",
+                # Kubernetes pod names are RFC-1123 labels and can never contain an underscore,
+                # so a fallback regex must use hyphens, not underscores, or it can never match
+                # a real pod (a bug found by live-cluster audit, e.g. for "ibm-streamsets-sdi").
+                "pod_regex": item.get("pod_regex") or component_id.replace("_", "-") + ".*",
                 "license_rule": (
                     "Supported Software Hub service. Add for monitoring only after entitlement and "
                     "License Service product/bundled-product rows are verified."
@@ -1224,12 +1490,112 @@ class ClusterTelemetryCollector:
 
         return results
 
+    @staticmethod
+    def _parse_k8s_cpu(value: str) -> float:
+        value = str(value or "0")
+        if value.endswith("m"):
+            try:
+                return float(value[:-1]) / 1000.0
+            except ValueError:
+                return 0.0
+        try:
+            return float(value)
+        except ValueError:
+            return 0.0
+
+    @staticmethod
+    def _parse_k8s_memory_gib(value: str) -> float:
+        value = str(value or "0")
+        units = {"Ki": 1 / (1024 * 1024), "Mi": 1 / 1024, "Gi": 1, "Ti": 1024,
+                 "K": 1e3 / (1024 ** 3), "M": 1e6 / (1024 ** 3), "G": 1e9 / (1024 ** 3), "T": 1e12 / (1024 ** 3)}
+        for suffix, factor in units.items():
+            if value.endswith(suffix):
+                try:
+                    return float(value[: -len(suffix)]) * factor
+                except ValueError:
+                    return 0.0
+        try:
+            return float(value) / (1024 ** 3)
+        except ValueError:
+            return 0.0
+
+    def get_cluster_compliance_controls(self) -> Dict[str, Any]:
+        """Real, checkable compliance-readiness signals that go beyond License Service's own
+        metering: node-pinning configuration and namespace resource quota presence. Node
+        pinning is IBM's documented mechanism (isc-entitlement node label; see
+        entitlement_application_and_node_pinning in IBM_LICENSE_TERMS_INFO) for keeping
+        multi-solution VPC/RU capacity attribution unambiguous — it is optional for a
+        single-solution instance but worth surfacing either way, from a live check rather than
+        an assumption."""
+        nodes_json = self.run_cmd(["oc", "get", "nodes", "-o", "json"])
+        nodes: List[Dict[str, Any]] = []
+        total_cpu = 0.0
+        total_mem_gib = 0.0
+        pinned_count = 0
+        gpu_capable_nodes = 0
+        if nodes_json:
+            try:
+                data = json.loads(nodes_json)
+                for item in data.get("items", []):
+                    labels = item.get("metadata", {}).get("labels", {}) or {}
+                    capacity = item.get("status", {}).get("capacity", {}) or {}
+                    cpu = self._parse_k8s_cpu(capacity.get("cpu"))
+                    mem_gib = self._parse_k8s_memory_gib(capacity.get("memory"))
+                    is_worker = "node-role.kubernetes.io/worker" in labels and "node-role.kubernetes.io/master" not in labels and "node-role.kubernetes.io/control-plane" not in labels
+                    isc_label = labels.get("isc-entitlement")
+                    has_gpu = any(k.startswith("nvidia.com/gpu") for k in capacity.keys())
+                    if has_gpu:
+                        gpu_capable_nodes += 1
+                    if isc_label:
+                        pinned_count += 1
+                    if is_worker:
+                        total_cpu += cpu
+                        total_mem_gib += mem_gib
+                    nodes.append({
+                        "name": item.get("metadata", {}).get("name"),
+                        "isWorker": is_worker,
+                        "cpuCores": cpu,
+                        "memoryGiB": round(mem_gib, 1),
+                        "iscEntitlementLabel": isc_label,
+                        "gpuCapable": has_gpu,
+                    })
+            except Exception:
+                pass
+
+        quota_json = self.run_cmd(["oc", "get", "resourcequota,limitrange", "-n", self.namespace_cpd, "-o", "json"])
+        has_quota = False
+        if quota_json:
+            try:
+                has_quota = len(json.loads(quota_json).get("items", [])) > 0
+            except Exception:
+                pass
+
+        return {
+            "nodes": nodes,
+            "workerNodeCount": sum(1 for n in nodes if n["isWorker"]),
+            "totalWorkerCpuCores": round(total_cpu, 1),
+            "totalWorkerMemoryGiB": round(total_mem_gib, 1),
+            "gpuCapableNodeCount": gpu_capable_nodes,
+            "nodePinningConfigured": pinned_count > 0,
+            "pinnedNodeCount": pinned_count,
+            "namespaceQuotaConfigured": has_quota,
+            "namespaceQuotaNote": (
+                f"No ResourceQuota/LimitRange found in namespace '{self.namespace_cpd}' — "
+                "compare service sizing against raw worker node capacity below, not a namespace ceiling."
+                if not has_quota else
+                f"A ResourceQuota or LimitRange is configured in namespace '{self.namespace_cpd}'."
+            ),
+            "sources": ["https://www.ibm.com/docs/en/software-hub/5.4.x?topic=entitlements-applying-your-without-node-pinning",
+                        "https://www.ibm.com/docs/en/SSNFH6_5.1.x/hub/plan/node-planning.html"],
+        }
+
     def get_cluster_overview(self) -> Dict[str, Any]:
         lic = self.get_license_service_data()
         services = self.get_service_telemetry()
         supported_services = self.get_supported_services(services)
         install_options = self.get_install_options_overview()
         dependency_explorer = self.get_dependency_explorer(services, install_options)
+        compliance_controls = self.get_cluster_compliance_controls()
 
         total_cpu_used = sum(s["cpu_used_cores"] for s in services.values())
         total_cpu_limit = sum(s["cpu_limit_cores"] for s in services.values())
@@ -1248,6 +1614,7 @@ class ClusterTelemetryCollector:
             "licensing": lic,
             "install_options": install_options,
             "dependency_explorer": dependency_explorer,
+            "compliance_controls": compliance_controls,
             "supported_services": supported_services,
             "services": services,
             "totals": {
@@ -1271,14 +1638,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <title>IBM Software Hub | VPC/RU License Metering</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Sans+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
 <style>
   /* -------------------------------------------------------------------------
      OFFICIAL IBM CARBON DESIGN SYSTEM (carbondesignsystem.com) SPEC
+     + a signature "metering" accent (see --cds-metering-*) for the one thing this
+     product actually does that no other Carbon app does: visualize licensed
+     capacity flowing from a cluster into IBM License Service.
      ------------------------------------------------------------------------- */
   :root {
     --cds-font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     --cds-font-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --cds-font-condensed: "IBM Plex Sans Condensed", var(--cds-font-sans);
     --cds-spacing-01: 2px;
     --cds-spacing-02: 4px;
     --cds-spacing-03: 8px;
@@ -1318,6 +1689,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     --cds-tag-bg-red: rgba(218, 30, 40, 0.2);
     --cds-tag-color-red: #ff8389;
     --cds-terms-bg: #1e1e1e;
+    /* Signature "metering flow" accent — used only for the license-metering
+       visualization (graph flow edges, live pulse), never as a semantic status
+       color, so it never competes with success/warning/danger. */
+    --cds-metering-accent: #00e5c7;
+    --cds-metering-accent-dim: rgba(0, 229, 199, 0.22);
+    --cds-canvas-grid: rgba(255, 255, 255, 0.05);
   }
 
   /* Carbon Gray 10 Theme (Light) */
@@ -1349,6 +1726,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     --cds-tag-bg-red: #ffebe9;
     --cds-tag-color-red: #a2191f;
     --cds-terms-bg: #f9f9fb;
+    --cds-metering-accent: #007567;
+    --cds-metering-accent-dim: rgba(0, 117, 103, 0.14);
+    --cds-canvas-grid: rgba(0, 0, 0, 0.05);
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1388,6 +1768,180 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     display: flex;
     align-items: center;
     gap: var(--cds-spacing-03);
+  }
+
+  /* ── App shell: persistent left nav + status rail, like a real ops console ── */
+  .cds--app-body {
+    display: flex;
+    align-items: stretch;
+    min-height: calc(100vh - 48px);
+  }
+  .cds--sidenav {
+    width: 232px;
+    flex: 0 0 232px;
+    background: var(--cds-layer-01);
+    border-right: 1px solid var(--cds-border-subtle-01);
+    position: sticky;
+    top: 48px;
+    height: calc(100vh - 48px);
+    display: flex;
+    flex-direction: column;
+    z-index: 90;
+  }
+  .cds--sidenav-nav {
+    padding: var(--cds-spacing-05) 0;
+    flex: 1;
+    overflow-y: auto;
+  }
+  .cds--sidenav-section-label {
+    font-family: var(--cds-font-condensed);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--cds-text-helper);
+    padding: 0 var(--cds-spacing-05);
+    margin: var(--cds-spacing-04) 0 var(--cds-spacing-02);
+  }
+  .cds--sidenav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 10px var(--cds-spacing-05);
+    background: none;
+    border: none;
+    border-left: 3px solid transparent;
+    color: var(--cds-text-secondary);
+    font-family: var(--cds-font-sans);
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .cds--sidenav-item:hover {
+    background: var(--cds-layer-02);
+    color: var(--cds-text-primary);
+  }
+  .cds--sidenav-item.is-active {
+    background: var(--cds-layer-02);
+    color: var(--cds-text-primary);
+    border-left-color: var(--cds-metering-accent);
+    font-weight: 600;
+  }
+  .cds--sidenav-item .cds--nav-icon {
+    width: 16px; height: 16px; flex: none;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .cds--sidenav-item .cds--nav-badge {
+    margin-left: auto;
+    font-family: var(--cds-font-mono);
+    font-size: 10px;
+    color: var(--cds-text-helper);
+  }
+  .cds--sidenav-status {
+    border-top: 1px solid var(--cds-border-subtle-01);
+    padding: var(--cds-spacing-04) var(--cds-spacing-05);
+    font-size: 11px;
+    color: var(--cds-text-secondary);
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .cds--status-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    justify-content: space-between;
+  }
+  .cds--status-row .cds--status-label {
+    color: var(--cds-text-helper);
+    text-transform: uppercase;
+    font-size: 9px;
+    letter-spacing: 0.6px;
+  }
+  .cds--status-row .cds--status-value {
+    font-family: var(--cds-font-mono);
+    font-size: 10px;
+    color: var(--cds-text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 148px;
+    text-align: right;
+  }
+  .cds--status-dot {
+    display: inline-block;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    flex: none;
+  }
+  .cds--status-dot.is-live { background: var(--cds-support-success); box-shadow: 0 0 6px var(--cds-support-success); }
+  .cds--status-dot.is-simulated { background: var(--cds-support-warning); }
+  .cds--status-dot.is-down { background: var(--cds-support-danger); }
+  .cds--status-dot.is-loading { background: var(--cds-metering-accent); animation: cds-pulse-dot 1s ease-in-out infinite; }
+  @keyframes cds-pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+  .cds--shell-main {
+    flex: 1;
+    min-width: 0;
+  }
+  .cds--view-panel[hidden] { display: none !important; }
+
+  /* Slim top-of-page fetch indicator — a real "it's working", not a frozen screen */
+  .cds--fetch-bar {
+    position: sticky;
+    top: 48px;
+    left: 0;
+    height: 2px;
+    width: 100%;
+    background: transparent;
+    z-index: 95;
+    overflow: hidden;
+  }
+  .cds--fetch-bar::before {
+    content: "";
+    display: block;
+    height: 100%;
+    width: 30%;
+    background: var(--cds-metering-accent);
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+  .cds--fetch-bar.is-active::before {
+    opacity: 1;
+    animation: cds-fetch-sweep 1.1s ease-in-out infinite;
+  }
+  @keyframes cds-fetch-sweep {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(400%); }
+  }
+
+  /* Loading spinner used for any tile/card still waiting on its first real value */
+  .cds--spinner {
+    display: inline-block;
+    width: 14px; height: 14px;
+    border: 2px solid var(--cds-border-subtle-01);
+    border-top-color: var(--cds-metering-accent);
+    border-radius: 50%;
+    animation: cds-spin 0.7s linear infinite;
+    vertical-align: middle;
+  }
+  @keyframes cds-spin { to { transform: rotate(360deg); } }
+  .cds--tile__value.is-loading { display: flex; align-items: center; gap: 8px; font-size: 16px; color: var(--cds-text-helper); }
+
+  @media (max-width: 900px) {
+    .cds--app-body { flex-direction: column; }
+    .cds--sidenav {
+      width: 100%; flex: none; position: relative; top: 0; height: auto;
+      flex-direction: row; overflow-x: auto; border-right: none;
+      border-bottom: 1px solid var(--cds-border-subtle-01);
+    }
+    .cds--sidenav-nav { display: flex; padding: var(--cds-spacing-03); flex: none; }
+    .cds--sidenav-item { border-left: none; border-bottom: 3px solid transparent; white-space: nowrap; }
+    .cds--sidenav-item.is-active { border-left-color: transparent; border-bottom-color: var(--cds-metering-accent); }
+    .cds--sidenav-section-label { display: none; }
+    .cds--sidenav-status { display: none; }
   }
 
   /* Carbon Button */
@@ -1585,27 +2139,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     align-items: center;
     gap: 8px;
   }
-  .cds--terms-list {
-    list-style: none;
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-    gap: 8px 16px;
-    margin-top: 8px;
-    font-size: 12px;
-    color: var(--cds-text-secondary);
-  }
-  .cds--terms-list li {
-    position: relative;
-    padding-left: 14px;
-  }
-  .cds--terms-list li::before {
-    content: "•";
-    position: absolute;
-    left: 0;
-    color: var(--cds-interactive-accent);
-    font-weight: bold;
-  }
-
   .cds--insight-grid {
     display: grid;
     grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
@@ -1732,22 +2265,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .cds--neo-canvas {
     min-height: 820px;
     background:
-      linear-gradient(90deg, color-mix(in srgb, var(--cds-layer-02) 26%, transparent) 1px, transparent 1px),
-      linear-gradient(0deg, color-mix(in srgb, var(--cds-layer-02) 26%, transparent) 1px, transparent 1px),
+      radial-gradient(ellipse 60% 45% at 50% 18%, var(--cds-metering-accent-dim), transparent 70%),
+      linear-gradient(90deg, var(--cds-canvas-grid) 1px, transparent 1px),
+      linear-gradient(0deg, var(--cds-canvas-grid) 1px, transparent 1px),
       var(--cds-background);
-    background-size: 40px 40px;
+    background-size: 100% 100%, 32px 32px, 32px 32px;
     position: relative;
-  }
-  .cds--neo-canvas svg {
-    width: 100%;
-    height: 820px;
-    display: block;
+    overflow: hidden;
   }
   #dependency-graph-cy {
     width: 100%;
     height: 820px;
     display: block;
+    opacity: 0;
+    transition: opacity 0.6s ease;
   }
+  #dependency-graph-cy.is-ready { opacity: 1; }
   .cds--graph-controls {
     position: absolute;
     top: 12px;
@@ -1757,70 +2290,32 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     gap: 6px;
     flex-wrap: wrap;
     justify-content: flex-end;
+    align-items: center;
   }
-  .cds--neo-link {
-    stroke: var(--cds-border-strong-01);
-    stroke-width: 1.4;
-    fill: none;
-    opacity: 0.72;
-    transition: stroke 0.18s, opacity 0.18s, stroke-width 0.18s;
-    cursor: pointer;
-    pointer-events: stroke;
-  }
-  .cds--neo-link-hit {
-    stroke: transparent;
-    stroke-width: 18;
-    fill: none;
-    cursor: pointer;
-    pointer-events: stroke;
-  }
-  .cds--neo-link.is-emphasis {
-    stroke: var(--cds-interactive-01);
-    stroke-width: 2.4;
-    opacity: 1;
-  }
-  .cds--neo-link.is-selected-path {
-    stroke: var(--cds-support-success);
-    stroke-width: 2.8;
-    opacity: 1;
-    stroke-dasharray: 8 5;
-    animation: cdsFlowDash 1.8s linear infinite;
-  }
-  .cds--neo-node {
-    cursor: pointer;
-  }
-  .cds--neo-node circle {
-    stroke: var(--cds-background);
-    stroke-width: 3;
-    transition: stroke 0.18s, stroke-width 0.18s;
-  }
-  .cds--neo-node:hover circle,
-  .cds--neo-node.is-selected circle {
-    stroke: var(--cds-text-primary);
-    stroke-width: 4;
-  }
-  .cds--neo-node.is-focus circle {
-    stroke: #ffffff;
-    stroke-width: 5;
-  }
-  .cds--neo-label-bg {
-    fill: var(--cds-background);
-    stroke: var(--cds-border-subtle-01);
-    stroke-width: 1;
-    opacity: 0.96;
-  }
-  .cds--neo-node text {
-    fill: var(--cds-text-primary);
+  .cds--zoom-readout {
+    font-family: var(--cds-font-mono);
     font-size: 11px;
-    font-family: var(--cds-font-sans);
-    pointer-events: none;
+    color: var(--cds-text-helper);
+    background: var(--cds-layer-01);
+    border: 1px solid var(--cds-border-subtle-01);
+    padding: 5px 10px;
+    min-width: 46px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
   }
-  .cds--neo-node .cds--node-type {
-    fill: var(--cds-text-helper);
-    font-size: 9px;
+  .cds--graph-controls .cds--raw-link {
+    background: var(--cds-layer-01);
+    border: 1px solid var(--cds-border-subtle-01);
+    padding: 5px 10px;
+    font-family: var(--cds-font-mono);
+    font-size: 11px;
+    color: var(--cds-text-secondary);
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
   }
-  @keyframes cdsFlowDash {
-    to { stroke-dashoffset: -26; }
+  .cds--graph-controls .cds--raw-link:hover {
+    border-color: var(--cds-metering-accent);
+    color: var(--cds-text-primary);
   }
   .cds--neo-side {
     background: var(--cds-layer-01);
@@ -1863,35 +2358,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     color: var(--cds-text-primary);
     font-weight: 500;
   }
-  .cds--collapsible-section {
-    margin: var(--cds-spacing-07) 0;
-    border: 1px solid var(--cds-border-subtle-01);
-    background: var(--cds-layer-01);
-  }
-  .cds--collapsible-section > summary {
-    list-style: none;
-    cursor: pointer;
-    padding: var(--cds-spacing-05);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-  }
-  .cds--collapsible-section > summary::-webkit-details-marker {
-    display: none;
-  }
-  .cds--collapsible-section > summary::after {
-    content: "+";
-    font-family: var(--cds-font-mono);
-    color: var(--cds-interactive-01);
-    font-size: 18px;
-  }
-  .cds--collapsible-section[open] > summary::after {
-    content: "-";
-  }
-  .cds--collapsible-content {
-    padding: 0 var(--cds-spacing-05) var(--cds-spacing-05);
-  }
   .cds--neo-legend {
     display: flex;
     flex-wrap: wrap;
@@ -1915,70 +2381,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     background: var(--cds-layer-02);
     flex-wrap: wrap;
   }
-  .cds--dependency-grid {
-    display: grid;
-    grid-template-columns: minmax(220px, 0.9fr) minmax(280px, 1.2fr) minmax(280px, 1.2fr) minmax(220px, 0.9fr);
-    gap: 1px;
-    background: var(--cds-border-subtle-01);
-  }
-  .cds--dependency-lane {
-    background: var(--cds-layer-01);
-    min-height: 360px;
-    padding: var(--cds-spacing-04);
-  }
-  .cds--dependency-lane h3 {
-    font-size: 12px;
-    text-transform: uppercase;
-    color: var(--cds-text-helper);
-    letter-spacing: 0.6px;
-    margin-bottom: var(--cds-spacing-04);
-  }
-  .cds--graph-node {
-    width: 100%;
-    text-align: left;
-    border: 1px solid var(--cds-border-subtle-01);
-    background: var(--cds-background);
-    color: var(--cds-text-primary);
-    padding: 10px 12px;
-    margin-bottom: 10px;
-    cursor: pointer;
-    position: relative;
-    transition: transform 0.18s cubic-bezier(0.2, 0, 0.38, 0.9), border-color 0.18s, background-color 0.18s;
-  }
-  .cds--graph-node:hover,
-  .cds--graph-node.is-active {
-    transform: translateX(2px);
-    border-color: var(--cds-interactive-01);
-    background: var(--cds-layer-02);
-  }
-  .cds--graph-node::after {
-    content: "";
-    position: absolute;
-    right: -14px;
-    top: 50%;
-    width: 18px;
-    height: 1px;
-    background: var(--cds-interactive-01);
-    opacity: 0.42;
-  }
-  .cds--dependency-lane:last-child .cds--graph-node::after {
-    display: none;
-  }
-  .cds--graph-node-title {
-    display: block;
-    font-size: 13px;
-    font-weight: 600;
-    margin-bottom: 4px;
-  }
   .cds--graph-node-meta {
     display: flex;
     gap: 6px;
     flex-wrap: wrap;
     margin-bottom: 6px;
-  }
-  .cds--graph-node p {
-    font-size: 11px;
-    color: var(--cds-text-secondary);
   }
   .cds--relationship-list {
     padding: var(--cds-spacing-05);
@@ -2308,34 +2715,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     color: var(--cds-text-primary);
   }
 
-  /* Carbon Data Table */
-  .cds--data-table-container {
-    background-color: var(--cds-layer-01);
-    border: 1px solid var(--cds-border-subtle-01);
-    overflow-x: auto;
-    margin-bottom: var(--cds-spacing-08);
-  }
-  table.cds--data-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 13px;
-  }
-  table.cds--data-table th {
-    background-color: var(--cds-layer-02);
-    color: var(--cds-text-primary);
-    text-align: left;
-    padding: 12px 16px;
-    font-weight: 600;
-    border-bottom: 1px solid var(--cds-border-subtle-01);
-  }
-  table.cds--data-table td {
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--cds-border-subtle-01);
-    color: var(--cds-text-primary);
-  }
-  table.cds--data-table tr:hover td {
-    background-color: var(--cds-layer-02);
-  }
   code.cds--snippet {
     font-family: var(--cds-font-mono);
     font-size: 12px;
@@ -2446,12 +2825,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .cds--grid {
       padding: 16px;
     }
-    .cds--dependency-grid {
-      grid-template-columns: 1fr;
-    }
-    .cds--graph-node::after {
-      display: none;
-    }
     .cds--form-grid {
       grid-template-columns: 1fr;
     }
@@ -2480,6 +2853,48 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 </header>
 
+<div class="cds--app-body">
+<nav class="cds--sidenav" aria-label="Dashboard sections">
+  <div class="cds--sidenav-nav">
+    <div class="cds--sidenav-section-label">Monitor</div>
+    <button class="cds--sidenav-item is-active" data-view="overview" onclick="switchView('overview')">
+      <span class="cds--nav-icon"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.5" y="1.5" width="6" height="6" rx="1"/><rect x="8.5" y="1.5" width="6" height="6" rx="1"/><rect x="1.5" y="8.5" width="6" height="6" rx="1"/><rect x="8.5" y="8.5" width="6" height="6" rx="1"/></svg></span> Overview
+    </button>
+    <button class="cds--sidenav-item" data-view="services" onclick="switchView('services')">
+      <span class="cds--nav-icon"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M8 1.5 14.5 5 8 8.5 1.5 5Z"/><path d="M1.5 8.5 8 12l6.5-3.5"/><path d="M1.5 11.5 8 15l6.5-3.5"/></svg></span> Services <span class="cds--nav-badge" id="nav-badge-services"></span>
+    </button>
+    <button class="cds--sidenav-item" data-view="graph" onclick="switchView('graph')">
+      <span class="cds--nav-icon"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="3" cy="3.5" r="1.8"/><circle cx="13" cy="3.5" r="1.8"/><circle cx="8" cy="13" r="1.8"/><path d="M4.5 4.6 6.7 11M11.5 4.6 9.3 11M4.8 3.5h6.4"/></svg></span> Dependency Graph
+    </button>
+    <div class="cds--sidenav-section-label">Governance</div>
+    <button class="cds--sidenav-item" data-view="compliance" onclick="switchView('compliance')">
+      <span class="cds--nav-icon"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M8 1.5 14 3.5v4c0 4-2.7 6.3-6 7-3.3-.7-6-3-6-7v-4Z"/><path d="M5.3 8 7.3 10 10.8 6" stroke-linecap="round"/></svg></span> Compliance &amp; Audit
+    </button>
+    <button class="cds--sidenav-item" data-view="reference" onclick="switchView('reference')">
+      <span class="cds--nav-icon"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3.2C6.8 2.3 4.8 1.8 2 1.8v10.4c2.8 0 4.8.5 6 1.4 1.2-.9 3.2-1.4 6-1.4V1.8c-2.8 0-4.8.5-6 1.4Z"/><path d="M8 3.2v10.4"/></svg></span> Reference
+    </button>
+  </div>
+  <div class="cds--sidenav-status" id="sidenav-status">
+    <div class="cds--status-row">
+      <span class="cds--status-label">Cluster</span>
+      <span class="cds--status-value" id="status-cluster-url" title="">--</span>
+    </div>
+    <div class="cds--status-row">
+      <span class="cds--status-label">License Service</span>
+      <span class="cds--status-value" style="display:flex; align-items:center; gap:5px; justify-content:flex-end;">
+        <span class="cds--status-dot is-loading" id="status-license-dot"></span>
+        <span id="status-license-text">checking&hellip;</span>
+      </span>
+    </div>
+    <div class="cds--status-row">
+      <span class="cds--status-label">Updated</span>
+      <span class="cds--status-value" id="status-updated">--</span>
+    </div>
+  </div>
+</nav>
+
+<div class="cds--shell-main">
+<div class="cds--fetch-bar" id="fetch-bar"></div>
 <main class="cds--grid">
 
   <div class="cds--page-header">
@@ -2492,191 +2907,167 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <section class="cds--finance-grid" id="finance-command-center"></section>
+  <section class="cds--view-panel" data-view-panel="overview">
+    <section class="cds--finance-grid" id="finance-command-center"></section>
 
-  <!-- IBM release and license posture -->
-  <div class="cds--terms-container">
-    <div class="cds--terms-header">
-      <div class="cds--terms-title">
-        <span>Compliance posture</span>
-        <span class="cds--tag cds--tag--green">watsonx.data standard / non-premium</span>
+    <!-- High-Level Metric Tiles (Carbon 2x Grid) -->
+    <div class="cds--grid-overview">
+      <div class="cds--tile">
+        <div class="cds--tile__label">
+          <span>VPC reported</span>
+          <span class="cds--tag cds--tag--green" id="vpc-status-tag">Within limit</span>
+        </div>
+        <div class="cds--tile__value" id="tot-vpc"><span class="cds--spinner"></span></div>
+        <div class="cds--tile__helper" id="vpc-helper">VPC entitlement from IBM_VPC_ENTITLEMENT</div>
+        <div id="vpc-mini-bars"></div>
+        <div class="cds--progress-bar"><div class="cds--progress-bar__fill" id="vpc-bar" style="background-color:var(--cds-interactive-accent); width:0%;"></div></div>
       </div>
+
+      <div class="cds--tile">
+        <div class="cds--tile__label">
+          <span>RU reported</span>
+          <span id="cpu-pct-tag">--%</span>
+        </div>
+        <div class="cds--tile__value" id="tot-ru"><span class="cds--spinner"></span></div>
+        <div class="cds--tile__helper" id="ru-helper">RU entitlement from IBM_RU_ENTITLEMENT</div>
+        <div id="ru-mini-bars"></div>
+        <div class="cds--progress-bar"><div class="cds--progress-bar__fill" id="cpu-bar" style="width:0%;"></div></div>
+      </div>
+
+      <div class="cds--tile">
+        <div class="cds--tile__label">
+          <span>CPU allocation</span>
+          <span id="mem-pct-tag">--%</span>
+        </div>
+        <div class="cds--tile__value" id="tot-cpu"><span class="cds--spinner"></span></div>
+        <div class="cds--tile__helper">Live/query fallback: container CPU usage vs limits</div>
+        <div id="cpu-mini-bars"></div>
+        <div class="cds--progress-bar"><div class="cds--progress-bar__fill" id="mem-bar" style="background-color:var(--cds-support-success); width:0%;"></div></div>
+      </div>
+
+      <div class="cds--tile">
+        <div class="cds--tile__label">
+          <span>Discovered Stack Services</span>
+          <span class="cds--tag cds--tag--blue" id="live-cr-tag">CRDs Active</span>
+        </div>
+        <div class="cds--tile__value" id="svc-count-val"><span class="cds--spinner"></span></div>
+        <div class="cds--tile__helper">Operators Reconciled</div>
+        <div class="cds--progress-bar"><div class="cds--progress-bar__fill" style="background-color:var(--cds-support-info); width:100%;"></div></div>
+      </div>
+    </div>
+
+    <!-- IBM release and license posture -->
+    <div class="cds--terms-container">
+      <div class="cds--terms-header">
+        <div class="cds--terms-title">
+          <span>Compliance posture</span>
+          <span class="cds--tag cds--tag--green">watsonx.data standard / non-premium</span>
+        </div>
+        <div style="font-size:12px; color:var(--cds-text-helper);">
+          Premium reference: <strong>L-PCPF-BJV4WW</strong> only when entitlement says Premium &middot; full guardrails under <a href="#" onclick="switchView('reference'); return false;" style="color:var(--cds-interactive-01);">Reference</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="cds--insight-grid">
+      <section class="cds--panel">
+        <h2 class="cds--panel-title">Supported release map</h2>
+        <div class="cds--release-grid" id="release-grid"></div>
+      </section>
+      <aside class="cds--callout">
+        <strong>How to read this dashboard</strong>
+        The product table comes from IBM License Service. The service cards add CRD sizing,
+        pod CPU limits, and memory working set to explain why a t-shirt size or entitlement
+        threshold is being approached. This is presentation evidence, not a replacement for IBM terms.
+      </aside>
+    </div>
+  </section>
+
+  <section class="cds--view-panel" data-view-panel="services" hidden>
+    <!-- Content Switcher: Live vs. Simulated T-Shirt Sizing Profile -->
+    <div class="cds--action-bar">
+      <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+        <span style="font-size:12px; font-weight:600; text-transform:uppercase; color:var(--cds-text-secondary); letter-spacing:0.5px;">Inspect / Override CR Sizing:</span>
+        <div class="cds--content-switcher">
+          <button class="cds--content-switcher-btn cds--content-switcher--selected" onclick="setSimScale('live', this)">Live CRDs</button>
+          <button class="cds--content-switcher-btn" onclick="setSimScale('small_mincpureq', this)">small_mincpureq (Lab)</button>
+          <button class="cds--content-switcher-btn" onclick="setSimScale('small', this)">small (Std)</button>
+          <button class="cds--content-switcher-btn" onclick="setSimScale('medium', this)">medium (Dept)</button>
+          <button class="cds--content-switcher-btn" onclick="setSimScale('large', this)">large (Enterprise)</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="cds--section-header">
+      <h2 class="cds--section-title">Installed Services, CRD Sizing &amp; License Terms</h2>
       <div style="font-size:12px; color:var(--cds-text-helper);">
-        Premium reference: <strong>L-PCPF-BJV4WW</strong> only when entitlement says Premium
+        Showing Live Custom Resource Sizing (<code>spec.scaleConfig</code>) &amp; Dependencies
       </div>
     </div>
-    <details class="cds--finance-details">
-      <summary>Show compliance guardrails and interpretation rules</summary>
-      <ul class="cds--terms-list">
-        <li><strong>Metric truth:</strong> read IBM License Service <code>metricName</code> and <code>metricQuantity</code>; keep RU and VPC separate.</li>
-        <li><strong>Release scope:</strong> includes Software Hub / CPD 5.3 with watsonx 2.3 and Software Hub / CPD 5.4 with watsonx 2.4.</li>
-        <li><strong>Premium guardrail:</strong> do not label watsonx.data as Premium unless License Service and entitlement records say Premium.</li>
-        <li><strong>Knowledge Catalog boundary:</strong> base WKC is IBM Knowledge Catalog; Premium/model features are a separate entitlement and can involve GPU/remote model placement.</li>
-        <li><strong>Data quality boundary:</strong> Knowledge Catalog data quality can use DataStage components; show restricted DQ use separately from standalone DataStage.</li>
-        <li><strong>Lineage boundary:</strong> MANTA / data lineage is tracked as its own lineage capability, not as a generic WKC data quality toggle.</li>
-        <li><strong>Audit trail:</strong> use License Service snapshot evidence for audits; Prometheus limits are sizing context.</li>
-      </ul>
-    </details>
-  </div>
-
-  <div class="cds--insight-grid">
-    <section class="cds--panel">
-      <h2 class="cds--panel-title">Supported release map</h2>
-      <div class="cds--release-grid" id="release-grid"></div>
-    </section>
-    <aside class="cds--callout">
-      <strong>How to read this dashboard</strong>
-      The product table comes from IBM License Service. The service cards add CRD sizing,
-      pod CPU limits, and memory working set to explain why a t-shirt size or entitlement
-      threshold is being approached. This is presentation evidence, not a replacement for IBM terms.
-    </aside>
-  </div>
-
-  <details class="cds--collapsible-section">
-    <summary>
-      <div>
-        <h2 class="cds--section-title">IBM source map</h2>
-        <div style="font-size:12px; color:var(--cds-text-helper);">
-          Public IBM pages used for release, entitlement, dependency, and metric interpretation
-        </div>
-      </div>
-    </summary>
-    <div class="cds--collapsible-content">
-      <div class="cds--source-grid" id="source-grid"></div>
+    <div class="cds--services-grid" id="services-grid">
+      <!-- Dynamic Service Cards -->
     </div>
-  </details>
+  </section>
 
-  <details class="cds--collapsible-section">
-    <summary>
-      <div>
-        <h2 class="cds--section-title">Install options and dependency impact</h2>
-        <div style="font-size:12px; color:var(--cds-text-helper);" id="install-options-source">
-          install-options.yml not loaded yet
-        </div>
-      </div>
-    </summary>
-    <div class="cds--collapsible-content">
-      <div class="cds--option-grid" id="install-options-grid"></div>
-    </div>
-  </details>
-
-  <div class="cds--section-header">
-    <h2 class="cds--section-title">Product, add-on and dependency explorer</h2>
-    <div style="font-size:12px; color:var(--cds-text-helper);">
-      Separates core products, optional install options, dependencies, integrated add-ons, and Premium references
-    </div>
-  </div>
-  <div class="cds--dependency-explorer" id="dependency-explorer"></div>
-
-  <!-- Content Switcher: Live vs. Simulated T-Shirt Sizing Profile -->
-  <div class="cds--action-bar">
-    <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-      <span style="font-size:12px; font-weight:600; text-transform:uppercase; color:var(--cds-text-secondary); letter-spacing:0.5px;">Inspect / Override CR Sizing:</span>
-      <div class="cds--content-switcher">
-        <button class="cds--content-switcher-btn cds--content-switcher--selected" onclick="setSimScale('live', this)">Live CRDs</button>
-        <button class="cds--content-switcher-btn" onclick="setSimScale('small_mincpureq', this)">small_mincpureq (Lab)</button>
-        <button class="cds--content-switcher-btn" onclick="setSimScale('small', this)">small (Std)</button>
-        <button class="cds--content-switcher-btn" onclick="setSimScale('medium', this)">medium (Dept)</button>
-        <button class="cds--content-switcher-btn" onclick="setSimScale('large', this)">large (Enterprise)</button>
+  <section class="cds--view-panel" data-view-panel="graph" hidden>
+    <div class="cds--section-header">
+      <h2 class="cds--section-title">Product, add-on and dependency explorer</h2>
+      <div style="font-size:12px; color:var(--cds-text-helper);">
+        Separates core products, optional install options, dependencies, integrated add-ons, and Premium references
       </div>
     </div>
-  </div>
+    <div class="cds--dependency-explorer" id="dependency-explorer"></div>
+  </section>
 
-  <!-- High-Level Metric Tiles (Carbon 2x Grid) -->
-  <div class="cds--grid-overview">
-    <div class="cds--tile">
-      <div class="cds--tile__label">
-        <span>VPC reported</span>
-        <span class="cds--tag cds--tag--green" id="vpc-status-tag">Within limit</span>
+  <section class="cds--view-panel" data-view-panel="compliance" hidden>
+    <!-- License compliance controls: node pinning + namespace quota — real, checkable signals -->
+    <div class="cds--section-header">
+      <h2 class="cds--section-title">License compliance controls</h2>
+      <div style="font-size:12px; color:var(--cds-text-helper);">Live checks against IBM's documented entitlement-application mechanism</div>
+    </div>
+    <div class="cds--endpoint-grid" id="compliance-controls-grid" style="margin-bottom:var(--cds-spacing-07);"></div>
+
+    <!-- IBM License Service Registered Products -->
+    <div class="cds--section-header">
+      <h2 class="cds--section-title">IBM License Service &mdash; registered products</h2>
+      <div style="font-size:12px; color:var(--cds-text-helper);">
+        IBM License Service REST API: <code>/products</code> &middot; click a card for the raw response row
       </div>
-      <div class="cds--tile__value" id="tot-vpc">--</div>
-      <div class="cds--tile__helper" id="vpc-helper">VPC entitlement from IBM_VPC_ENTITLEMENT</div>
-      <div id="vpc-mini-bars"></div>
-      <div class="cds--progress-bar"><div class="cds--progress-bar__fill" id="vpc-bar" style="background-color:var(--cds-interactive-accent); width:0%;"></div></div>
     </div>
+    <div class="cds--endpoint-grid" id="license-products-grid" style="margin-bottom:var(--cds-spacing-07);"></div>
 
-    <div class="cds--tile">
-      <div class="cds--tile__label">
-        <span>RU reported</span>
-        <span id="cpu-pct-tag">--%</span>
+    <div class="cds--section-header">
+      <h2 class="cds--section-title">License Service API coverage</h2>
+      <div style="font-size:12px; color:var(--cds-text-helper);">
+        Shows what the standalone collector can use from IBM License Service
       </div>
-      <div class="cds--tile__value" id="tot-ru">--</div>
-      <div class="cds--tile__helper" id="ru-helper">RU entitlement from IBM_RU_ENTITLEMENT</div>
-      <div id="ru-mini-bars"></div>
-      <div class="cds--progress-bar"><div class="cds--progress-bar__fill" id="cpu-bar" style="width:0%;"></div></div>
     </div>
+    <div class="cds--endpoint-grid" id="endpoint-grid"></div>
+  </section>
 
-    <div class="cds--tile">
-      <div class="cds--tile__label">
-        <span>CPU allocation</span>
-        <span id="mem-pct-tag">--%</span>
+  <section class="cds--view-panel" data-view-panel="reference" hidden>
+    <div class="cds--section-header">
+      <h2 class="cds--section-title">Compliance guardrails &amp; interpretation rules</h2>
+      <div style="font-size:12px; color:var(--cds-text-helper);">How this dashboard reads IBM License Service data — one rule per card, not a wall of text</div>
+    </div>
+    <div class="cds--option-grid" id="guardrails-grid" style="margin-bottom:var(--cds-spacing-07);"></div>
+
+    <div class="cds--section-header">
+      <h2 class="cds--section-title">IBM source map</h2>
+      <div style="font-size:12px; color:var(--cds-text-helper);">
+        Public IBM pages used for release, entitlement, dependency, and metric interpretation
       </div>
-      <div class="cds--tile__value" id="tot-cpu">--</div>
-      <div class="cds--tile__helper">Live/query fallback: container CPU usage vs limits</div>
-      <div id="cpu-mini-bars"></div>
-      <div class="cds--progress-bar"><div class="cds--progress-bar__fill" id="mem-bar" style="background-color:var(--cds-support-success); width:0%;"></div></div>
     </div>
+    <div class="cds--source-grid" id="source-grid" style="margin-bottom:var(--cds-spacing-07);"></div>
 
-    <div class="cds--tile">
-      <div class="cds--tile__label">
-        <span>Discovered Stack Services</span>
-        <span class="cds--tag cds--tag--blue" id="live-cr-tag">CRDs Active</span>
+    <div class="cds--section-header">
+      <h2 class="cds--section-title">Install options and dependency impact</h2>
+      <div style="font-size:12px; color:var(--cds-text-helper);" id="install-options-source">
+        install-options.yml not loaded yet
       </div>
-      <div class="cds--tile__value" id="svc-count-val">--</div>
-      <div class="cds--tile__helper">Operators Reconciled</div>
-      <div class="cds--progress-bar"><div class="cds--progress-bar__fill" style="background-color:var(--cds-support-info); width:100%;"></div></div>
     </div>
-  </div>
-
-  <!-- Services & CR Sizing Grid -->
-  <div class="cds--section-header">
-    <h2 class="cds--section-title">Installed Services, CRD Sizing &amp; License Terms</h2>
-    <div style="font-size:12px; color:var(--cds-text-helper);">
-      Showing Live Custom Resource Sizing (<code>spec.scaleConfig</code>) &amp; Dependencies
-    </div>
-  </div>
-  <div class="cds--services-grid" id="services-grid">
-    <!-- Dynamic Service Cards -->
-  </div>
-
-  <details class="cds--collapsible-section">
-    <summary>
-      <div>
-        <h2 class="cds--section-title">License Service API coverage</h2>
-        <div style="font-size:12px; color:var(--cds-text-helper);">
-          Shows what the standalone collector can use from IBM License Service
-        </div>
-      </div>
-    </summary>
-    <div class="cds--collapsible-content">
-      <div class="cds--endpoint-grid" id="endpoint-grid"></div>
-    </div>
-  </details>
-
-  <!-- IBM License Service Registered Products Table -->
-  <div class="cds--section-header">
-    <h2 class="cds--section-title">IBM License Service &mdash; registered products</h2>
-    <div style="font-size:12px; color:var(--cds-text-helper);">
-      IBM License Service REST API: <code>/products</code>
-    </div>
-  </div>
-  <div class="cds--data-table-container">
-    <table class="cds--data-table">
-      <thead>
-        <tr>
-          <th>Product Name</th>
-          <th>Product Identifier</th>
-          <th>Edition / Tier</th>
-          <th>Metric Unit</th>
-          <th>Sub-Capacity Quantity</th>
-          <th>Reported Status</th>
-        </tr>
-      </thead>
-      <tbody id="lic-table-body">
-        <!-- Dynamic Product Rows -->
-      </tbody>
-    </table>
-  </div>
+    <div class="cds--option-grid" id="install-options-grid"></div>
+  </section>
 
   <footer class="cds--footer">
     <div>Target: <span id="footer-ocp-info">api.watson.ibmas-zocp-techcluster.org:6443</span></div>
@@ -2684,6 +3075,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </footer>
 
 </main>
+</div>
+</div>
 
 <!-- Modal for Adding Custom Services dynamically -->
 <div class="cds--modal-backdrop" id="add-modal">
@@ -2750,8 +3143,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 
 <script src="/vendor/cytoscape.min.js"></script>
-<script src="/vendor/dagre.min.js"></script>
-<script src="/vendor/cytoscape-dagre.js"></script>
+<script src="/vendor/elk.bundled.js"></script>
+<script src="/vendor/cytoscape-elk.js"></script>
+<script src="/vendor/cytoscape-expand-collapse.js"></script>
 <script>
 let currentScaleOverride = 'live';
 let rawData = null;
@@ -2759,8 +3153,10 @@ let supportedServices = [];
 let rawInspectorItems = [];
 let dependencyExplorerState = { nodesById: {}, edges: [], selectedId: null };
 let dependencyCy = null;
-let cytoscapeDagreRegistered = false;
+let dependencyExpandCollapseApi = null;
+let cytoscapeExtensionsRegistered = false;
 let dependencyGraphSignature = '';
+let dependencyGraphHasBeenFocused = false;
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -2869,19 +3265,39 @@ function showDependencyEdge(edgeIndex) {
   `;
 }
 
-function dependencyNodeColor(node) {
-  const type = node?.type || '';
-  if (type === 'metering') return 'var(--cds-support-success)';
-  if (type.includes('premium')) return 'var(--cds-interactive-accent)';
-  if (type.includes('option') || type.includes('add_on')) return 'var(--cds-interactive-01)';
-  if (type.includes('dependency')) return 'var(--cds-support-info)';
-  return 'var(--cds-text-helper)';
-}
-
 function resolveCssColor(value) {
   const match = String(value || '').match(/^var\\((--[^)]+)\\)$/);
   if (!match) return value;
   return getComputedStyle(document.documentElement).getPropertyValue(match[1]).trim() || value;
+}
+
+// Parses any valid CSS color (hex, rgb(), named) into [r,g,b] by letting the browser's own
+// color engine do it, rather than hand-rolling a hex-only parser that would silently fail on
+// the rgb(...) strings getComputedStyle returns for resolved CSS variables.
+const _colorParseEl = typeof document !== 'undefined' ? document.createElement('div') : null;
+function parseColorToRgb(color) {
+  if (!_colorParseEl) return [128, 128, 128];
+  _colorParseEl.style.color = color;
+  document.body.appendChild(_colorParseEl);
+  const rgb = getComputedStyle(_colorParseEl).color;
+  document.body.removeChild(_colorParseEl);
+  const nums = rgb.match(/[\\d.]+/g);
+  return nums ? nums.slice(0, 3).map(Number) : [128, 128, 128];
+}
+
+function lightenColor(color, amount) {
+  const [r, g, b] = parseColorToRgb(color);
+  const lift = c => Math.min(255, Math.round(c + (255 - c) * amount));
+  // No spaces after the commas: cytoscape's background-gradient-stop-colors splits its
+  // value on whitespace to get the color list, so "rgb(1, 2, 3) rgb(4, 5, 6)" (the normal,
+  // human-readable rgb() format) gets shredded into five bogus tokens instead of two colors.
+  return `rgb(${lift(r)},${lift(g)},${lift(b)})`;
+}
+
+// Same whitespace-splitting hazard applies to any already-rgb() color reused inside a
+// gradient-stop-colors list (e.g. a value that came from getComputedStyle()).
+function compactRgb(color) {
+  return String(color).replace(/,\\s+/g, ',');
 }
 
 function collectDependencyLineage(selectedId) {
@@ -2974,37 +3390,53 @@ function highlightDependencyGraph(selectedId, selectedEdgeIndex = null) {
 
 function runDependencyLayout() {
   if (!dependencyCy) return;
-  const useDagre = typeof cytoscapeDagre !== 'undefined';
+  const useElk = typeof cytoscapeElk !== 'undefined';
 
-  // Temporarily hide platform-dep and foundation edges during layout so dagre
-  // doesn't use them for rank assignment — they cause everything to collapse
-  // onto a single rank. We re-show them after layout finishes.
+  // Temporarily hide platform-dep/foundation edges during layout so they don't get used for
+  // rank assignment (a hub node with dozens of "everyone depends on the platform" edges can
+  // still distort layered placement) — restored once the layout settles.
   const platformEdges = dependencyCy.edges('.edge-platform');
   platformEdges.style('display', 'none');
 
   dependencyCy.one('layoutstop', () => {
     platformEdges.style('display', 'element');
-    if (dependencyExplorerState.selectedId) {
+    revealDependencyGraph();
+    startEdgeFlowAnimation();
+    // The very first render defaults selectedId to a prominent node (e.g. watsonx_data) so
+    // the detail panel has something to show — but showDependencyNode's lineage highlighting
+    // dims and zooms to JUST that node's subgraph, which on first load made unrelated nodes
+    // (e.g. a standalone WKC/DataStage branch) sit outside the fitted viewport, looking like
+    // they'd failed to render. Show the whole graph un-dimmed first; a click narrows it.
+    if (dependencyExplorerState.selectedId && dependencyGraphHasBeenFocused) {
       showDependencyNode(dependencyExplorerState.selectedId);
     } else {
       fitDependencyGraph();
     }
   });
 
-  if (useDagre) {
+  if (useElk) {
+    // ELK's layered algorithm (Sugiyama phases + configurable crossing-minimization +
+    // network-simplex node placement) replaces dagre here — it is purpose-built for exactly
+    // this hub-heavy DAG shape (one platform root fanning into 25-40 leaf products) and needs
+    // far less hand-tuning than the taxi-routing/spacing hacks the dagre layout required.
     dependencyCy.layout({
-      name: 'dagre',
-      rankDir: 'TB',
-      ranker: 'network-simplex', // most overlap-free ranker for general graphs
-      nodeSep: 90,               // gap between nodes in the same rank (node is 160px wide → 90 gives breathing room)
-      edgeSep: 10,
-      rankSep: 140,              // vertical gap between ranks
-      acyclicer: 'greedy',
+      name: 'elk',
+      fit: true,
+      padding: 72,
       animate: true,
       animationDuration: 480,
       animationEasing: 'ease-out-cubic',
-      fit: true,
-      padding: 72
+      elk: {
+        algorithm: 'layered',
+        'elk.direction': 'DOWN',
+        'elk.layered.crossingMinimization.strategy': 'LAYER_SWEEP',
+        'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
+        'elk.layered.spacing.nodeNodeBetweenLayers': 70,
+        'elk.spacing.nodeNode': 45,
+        'elk.layered.spacing.edgeNodeBetweenLayers': 30,
+        'elk.edgeRouting': 'ORTHOGONAL',
+        'elk.layered.cycleBreaking.strategy': 'GREEDY'
+      }
     }).run();
   } else {
     dependencyCy.layout({
@@ -3020,6 +3452,12 @@ function runDependencyLayout() {
   }
 }
 
+function resizeDependencyGraph() {
+  if (!dependencyCy) return;
+  dependencyCy.resize();
+  fitDependencyGraph();
+}
+
 function fitDependencyGraph() {
   if (!dependencyCy) return;
   dependencyCy.animate({
@@ -3029,72 +3467,192 @@ function fitDependencyGraph() {
   });
 }
 
-function nodeShape(node) {
-  const t = node?.type || '';
-  if (t === 'platform' || t === 'metering')        return 'barrel';
-  if (t === 'platform_dependency')                  return 'round-rectangle';
-  if (t === 'core_product')                         return 'round-rectangle';
-  if (t.includes('premium'))                        return 'diamond';
-  if (t.includes('integration_component'))          return 'hexagon';
-  if (t.includes('add_on') || t.includes('add-on')) return 'ellipse';
-  if (t.includes('option'))                         return 'cut-rectangle';
-  if (t.includes('dependency'))                     return 'round-rectangle';
-  return 'round-rectangle';
+function zoomDependencyGraph(factor) {
+  if (!dependencyCy) return;
+  const level = Math.max(dependencyCy.minZoom(), Math.min(dependencyCy.maxZoom(), dependencyCy.zoom() * factor));
+  dependencyCy.animate({ zoom: { level, renderedPosition: { x: dependencyCy.width() / 2, y: dependencyCy.height() / 2 } }, duration: 180, easing: 'ease-out-cubic' });
 }
 
-function edgeClass(relationship) {
+function updateDependencyZoomReadout() {
+  const el = document.getElementById('dependency-zoom-readout');
+  if (el && dependencyCy) el.textContent = Math.round(dependencyCy.zoom() * 100) + '%';
+}
+
+const prefersReducedMotion = () => typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// Reveals the graph once ELK has settled on final positions (see the opacity:0 set right
+// after cytoscape() is constructed in initDependencyCytoscape) — a top-to-bottom stagger so
+// the tree appears to build itself, rather than a jumbled layout snapping into place.
+// Uses .animate()+removeStyle rather than a permanent .style() call so the opacity set here
+// doesn't outlive the animation and fight the .is-dim/.is-lineage class-driven opacity that
+// highlightDependencyGraph applies right after (an explicit per-element style in Cytoscape.js
+// otherwise persists over class-based styles).
+function revealDependencyGraph() {
+  const container = document.getElementById('dependency-graph-cy');
+  if (container) container.classList.add('is-ready');
+  if (!dependencyCy) return;
+  if (prefersReducedMotion()) {
+    dependencyCy.elements().removeStyle('opacity');
+    updateDependencyZoomReadout();
+    return;
+  }
+  const nodes = dependencyCy.nodes().sort((a, b) => a.position('y') - b.position('y'));
+  nodes.forEach((node, i) => {
+    node.animate(
+      { style: { opacity: 1 } },
+      { duration: 280, delay: i * 55, easing: 'ease-out-cubic', complete: () => node.removeStyle('opacity') }
+    );
+  });
+  const edgeDelay = nodes.length * 55;
+  dependencyCy.edges().forEach((edge, i) => {
+    edge.animate(
+      { style: { opacity: 1 } },
+      { duration: 320, delay: edgeDelay + i * 18, easing: 'ease-out-cubic', complete: () => edge.removeStyle('opacity') }
+    );
+  });
+  updateDependencyZoomReadout();
+}
+
+// The one place this dashboard's actual subject — licensed capacity being measured — gets a
+// literal visual: a slow marching-dash flow along "measured_by" edges, toward IBM License
+// Service. Deliberately the only continuously-animated element on the page.
+let dependencyFlowRafId = null;
+function startEdgeFlowAnimation() {
+  stopEdgeFlowAnimation();
+  if (!dependencyCy || prefersReducedMotion()) return;
+  const flowEdges = dependencyCy.edges('.edge-metering');
+  if (!flowEdges.length) return;
+  let offset = 0;
+  const step = () => {
+    offset = (offset - 0.6 + 1000) % 1000;
+    flowEdges.style('line-dash-offset', offset);
+    dependencyFlowRafId = requestAnimationFrame(step);
+  };
+  dependencyFlowRafId = requestAnimationFrame(step);
+}
+function stopEdgeFlowAnimation() {
+  if (dependencyFlowRafId) cancelAnimationFrame(dependencyFlowRafId);
+  dependencyFlowRafId = null;
+}
+
+// Single source of truth for node shape/color/label so the on-canvas rendering and the
+// legend can never drift apart (the previous hand-authored legend HTML documented 4
+// shapes/colors against 6/7 actually in use). Order matters: first match wins, most
+// specific checks first — mirrors the original nodeShape/nodeColor precedence exactly.
+const DEPENDENCY_NODE_STYLES = [
+  { match: t => t === 'metering',                              shape: 'barrel',         label: 'License metering',                    color: () => resolveCssColor('var(--cds-support-success)') },
+  { match: t => t === 'platform',                               shape: 'barrel',         label: 'Platform root',                       color: () => resolveCssColor('var(--cds-layer-02)') },
+  { match: t => t === 'platform_dependency',                    shape: 'round-rectangle',label: 'Platform dependency',                 color: () => resolveCssColor('var(--cds-layer-02)') },
+  { match: t => t === 'core_product',                           shape: 'round-rectangle',label: 'Core product',                        color: () => resolveCssColor('var(--cds-interactive-01)') },
+  { match: t => t.includes('premium'),                          shape: 'diamond',        label: 'Premium reference',                   color: () => '#7c3aed' },
+  { match: t => t.includes('integration_component'),            shape: 'hexagon',        label: 'Integration component (bundled RU)',  color: () => '#0e7490' },
+  { match: t => t.includes('add_on') || t.includes('add-on'),   shape: 'ellipse',        label: 'Add-on',                               color: () => '#0891b2' },
+  { match: t => t.includes('option'),                           shape: 'cut-rectangle',  label: 'Install option',                      color: () => '#6366f1' },
+  { match: t => t.includes('dependency'),                       shape: 'round-rectangle',label: 'Dependency',                          color: () => resolveCssColor('var(--cds-support-info)') },
+];
+const DEPENDENCY_NODE_STYLE_DEFAULT = { shape: 'round-rectangle', label: 'Other', color: () => resolveCssColor('var(--cds-support-info)') };
+
+function dependencyNodeStyle(node) {
+  const t = String(node?.type || '');
+  return DEPENDENCY_NODE_STYLES.find(s => s.match(t)) || DEPENDENCY_NODE_STYLE_DEFAULT;
+}
+function nodeShape(node) { return dependencyNodeStyle(node).shape; }
+
+// Crude CSS approximation of each cytoscape shape, good enough for a small legend swatch.
+function shapeSwatchStyle(shape) {
+  switch (shape) {
+    case 'barrel': return 'border-radius:40%;';
+    case 'diamond': return 'transform:rotate(45deg); border-radius:1px;';
+    case 'hexagon': return 'clip-path:polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%);';
+    case 'ellipse': return 'border-radius:50%;';
+    case 'cut-rectangle': return 'clip-path:polygon(15% 0,100% 0,100% 85%,85% 100%,0 100%,0 15%);';
+    default: return 'border-radius:3px;';
+  }
+}
+
+// Same single-source-of-truth principle for edges: class drives the CSS (color + dash
+// pattern, so relationship kind is never color-only — see the .edge-* rules), label+dash
+// feed the legend. Keep `dash`/`swatchColor` in sync with the matching `.edge-*` CSS rule
+// above if either changes.
+const DEPENDENCY_EDGE_STYLES = [
+  { match: r => r.includes('bundled_as_ru'),                                              cls: 'edge-bundled',    label: 'Bundled as RU',                  dash: 'solid',  swatchColor: '#0e7490' },
+  { match: r => r.includes('platform_dependency') || r.includes('foundation_dependency'),  cls: 'edge-platform',   label: 'Platform dependency',            dash: 'dotted', swatchColor: 'var(--cds-border-subtle-01)' },
+  { match: r => r.includes('optional') || r.includes('option'),                            cls: 'edge-optional',   label: 'Optional / install option',      dash: 'dashed', swatchColor: '#6366f1' },
+  { match: r => r.includes('restricted'),                                                  cls: 'edge-restricted', label: 'Restricted dependency',          dash: 'dashed', swatchColor: 'var(--cds-support-danger)' },
+  { match: r => r.includes('premium'),                                                     cls: 'edge-premium',    label: 'Premium reference',              dash: 'dashed', swatchColor: '#7c3aed' },
+  { match: r => r.includes('edition_uplift'),                                              cls: 'edge-edition',    label: 'Edition uplift',                 dash: 'solid',  swatchColor: 'var(--cds-interactive-01)' },
+  { match: r => r.includes('measured_by'),                                                 cls: 'edge-metering',   label: 'Measured by License Service',    dash: 'dashed', swatchColor: 'var(--cds-support-success)' },
+];
+const DEPENDENCY_EDGE_STYLE_DEFAULT = { cls: '', label: 'Deploys / depends on', dash: 'solid', swatchColor: 'var(--cds-border-strong-01)' };
+
+function dependencyEdgeStyle(relationship) {
   const r = String(relationship || '');
-  if (r.includes('bundled_as_ru'))       return 'edge-bundled';
-  if (r.includes('platform_dependency') || r.includes('foundation_dependency')) return 'edge-platform';
-  if (r.includes('optional') || r.includes('option')) return 'edge-optional';
-  if (r.includes('restricted'))          return 'edge-restricted';
-  if (r.includes('premium'))             return 'edge-premium';
-  if (r.includes('edition_uplift'))      return 'edge-edition';
-  if (r.includes('measured_by'))         return 'edge-metering';
-  return '';
+  return DEPENDENCY_EDGE_STYLES.find(s => s.match(r)) || DEPENDENCY_EDGE_STYLE_DEFAULT;
+}
+function edgeClass(relationship) { return dependencyEdgeStyle(relationship).cls; }
+
+function renderDependencyLegend() {
+  const nodeRows = DEPENDENCY_NODE_STYLES.map(s => `
+    <span><span class="cds--legend-dot" style="background:${s.color()}; ${shapeSwatchStyle(s.shape)}"></span>${esc(s.label)}</span>
+  `).join('');
+  const edgeRows = [...DEPENDENCY_EDGE_STYLES, DEPENDENCY_EDGE_STYLE_DEFAULT].map(s => `
+    <span><span style="display:inline-block;width:22px;height:0;border-top:2px ${s.dash} ${s.swatchColor};margin-right:6px;vertical-align:middle;"></span>${esc(s.label)}</span>
+  `).join('');
+  return `
+    <strong style="font-size:11px; color:var(--cds-text-secondary); text-transform:uppercase; letter-spacing:0.5px;">Node types</strong>
+    ${nodeRows}
+    <strong style="font-size:11px; color:var(--cds-text-secondary); text-transform:uppercase; letter-spacing:0.5px; margin-top:6px;">Relationship types</strong>
+    ${edgeRows}
+    <strong style="font-size:11px; color:var(--cds-text-secondary); text-transform:uppercase; letter-spacing:0.5px; margin-top:6px;">Border &amp; grouping</strong>
+    <span><span class="cds--legend-dot" style="background:transparent; border:3px solid var(--cds-support-success);"></span>Thick green border = confirmed via live CR / License Service</span>
+    <span><span class="cds--legend-dot" style="background:transparent; border:2px dashed var(--cds-border-strong-01);"></span>Dashed box = collapsible bundle (click the +/- cue, or use Collapse bundles)</span>
+  `;
+}
+
+function collapseDependencyBundles() {
+  if (dependencyExpandCollapseApi) dependencyExpandCollapseApi.collapseAll();
+}
+
+function expandDependencyGraph() {
+  if (dependencyExpandCollapseApi) dependencyExpandCollapseApi.expandAll();
+  else runDependencyLayout();
 }
 
 function initDependencyCytoscape(nodeMap, graphEdges) {
   const container = document.getElementById('dependency-graph-cy');
   if (!container || typeof cytoscape === 'undefined') return;
-  if (typeof cytoscapeDagre !== 'undefined' && !cytoscapeDagreRegistered) {
-    cytoscape.use(cytoscapeDagre);
-    cytoscapeDagreRegistered = true;
+  if (!cytoscapeExtensionsRegistered) {
+    if (typeof cytoscapeElk !== 'undefined') cytoscape.use(cytoscapeElk);
+    if (typeof cytoscapeExpandCollapse !== 'undefined') cytoscape.use(cytoscapeExpandCollapse);
+    cytoscapeExtensionsRegistered = true;
   }
   if (dependencyCy) {
+    stopEdgeFlowAnimation();
     dependencyCy.destroy();
     dependencyCy = null;
+    dependencyExpandCollapseApi = null;
   }
 
-  const col = {
-    platform:    resolveCssColor('var(--cds-layer-02)'),
-    metering:    resolveCssColor('var(--cds-support-success)'),
-    core:        resolveCssColor('var(--cds-interactive-01)'),
-    premium:     '#7c3aed',
-    integration: '#0e7490',
-    addon:       '#0891b2',
-    option:      '#6366f1',
-    dependency:  resolveCssColor('var(--cds-support-info)'),
-    installed_border: resolveCssColor('var(--cds-support-success)'),
-    default_border:   resolveCssColor('var(--cds-border-strong-01)'),
-  };
-  function nodeColor(node) {
-    const t = node?.type || '';
-    if (t === 'metering') return col.metering;
-    if (t === 'platform' || t === 'platform_dependency') return col.platform;
-    if (t === 'core_product') return col.core;
-    if (t.includes('premium')) return col.premium;
-    if (t.includes('integration_component')) return col.integration;
-    if (t.includes('add_on') || t.includes('add-on')) return col.addon;
-    if (t.includes('option')) return col.option;
-    if (t.includes('dependency')) return col.dependency;
-    return col.dependency;
-  }
+  const installedBorder = resolveCssColor('var(--cds-support-success)');
+  const defaultBorder = resolveCssColor('var(--cds-border-strong-01)');
+  const metering = resolveCssColor('var(--cds-metering-accent)');
+
+  // Nodes bundled into an edition as RU ("bundled_as_ru") become children of a compound
+  // parent node for that edition, so the fan-out can be collapsed to one node on demand via
+  // cytoscape-expand-collapse instead of always showing every bundled component. A compound
+  // parent's rendered size is automatically inferred from its children by Cytoscape.js
+  // regardless of the fixed leaf width/height set below, so this is safe to combine with them.
+  const parentOf = {};
+  graphEdges.forEach(edge => {
+    if (edge.relationship === 'bundled_as_ru' && nodeMap[edge.from] && nodeMap[edge.to] && !parentOf[edge.to]) {
+      parentOf[edge.to] = edge.from;
+    }
+  });
 
   const elements = [
     ...Object.values(nodeMap).map(node => {
       const status = node.option_status || (node.installed ? 'installed' : dependencyTypeLabel(node.type));
-      const bgColor = nodeColor(node);
+      const bgColor = dependencyNodeStyle(node).color();
       const isPlatform = node.type === 'platform' || node.type === 'platform_dependency' || node.type === 'metering';
       const textColor = isPlatform ? resolveCssColor('var(--cds-text-primary)') : '#ffffff';
       return {
@@ -3104,9 +3662,14 @@ function initDependencyCytoscape(nodeMap, graphEdges) {
           status,
           type: dependencyTypeLabel(node.type),
           bgColor,
+          // cytoscape's background-gradient-stop-colors takes ONE data() reference whose
+          // value is the full space-separated color list — not multiple data() calls — and
+          // splits on ANY whitespace, so every color in the list must itself be space-free.
+          gradientStops: `${lightenColor(bgColor, 0.4)} ${compactRgb(bgColor)}`,
           textColor,
-          borderColor: node.installed ? col.installed_border : col.default_border,
+          borderColor: node.installed ? installedBorder : defaultBorder,
           shape: nodeShape(node),
+          ...(parentOf[node.id] ? { parent: parentOf[node.id] } : {}),
         },
         classes: [
           node.installed ? 'is-installed' : '',
@@ -3159,7 +3722,9 @@ function initDependencyCytoscape(nodeMap, graphEdges) {
         selector: 'node',
         style: {
           'shape': 'data(shape)',
-          'background-color': 'data(bgColor)',
+          'background-fill': 'linear-gradient',
+          'background-gradient-stop-colors': 'data(gradientStops)',
+          'background-gradient-direction': 'to-bottom-right',
           'border-width': 2,
           'border-color': 'data(borderColor)',
           'width': 160,           // wide enough for longest label without wrapping
@@ -3175,8 +3740,10 @@ function initDependencyCytoscape(nodeMap, graphEdges) {
           'font-size': 10,
           'font-weight': 600,
           'overlay-opacity': 0,
-          'transition-property': 'border-width, border-color, opacity',
-          'transition-duration': 180
+          'overlay-padding': 10,
+          'transition-property': 'border-width, border-color, opacity, overlay-opacity, width, height',
+          'transition-duration': 180,
+          'transition-timing-function': 'ease-out'
         }
       },
       // Platform / metering — wider pill
@@ -3199,10 +3766,15 @@ function initDependencyCytoscape(nodeMap, graphEdges) {
         selector: '.is-installed',
         style: { 'border-width': 3 }
       },
-      // Focus node — pop out
+      // Focus node — pop out with a glow ring in the signature metering color. Cytoscape has
+      // no box-shadow equivalent; overlay-* (a soft tinted halo drawn behind the node) is the
+      // real supported mechanism for this.
       {
         selector: 'node.is-focus',
-        style: { 'border-width': 5, 'border-color': '#ffffff', 'width': 176, 'height': 60, 'font-size': 11 }
+        style: {
+          'border-width': 5, 'border-color': '#ffffff', 'width': 176, 'height': 60, 'font-size': 11,
+          'overlay-color': metering, 'overlay-opacity': 0.35, 'overlay-padding': 14
+        }
       },
 
       // ── Base edge ──────────────────────────────────────────────
@@ -3251,11 +3823,11 @@ function initDependencyCytoscape(nodeMap, graphEdges) {
         style: {
           'line-style': 'dashed',
           'line-dash-pattern': [5, 3],
-          'line-color': resolveCssColor('var(--cds-support-error)'),
-          'target-arrow-color': resolveCssColor('var(--cds-support-error)'),
+          'line-color': resolveCssColor('var(--cds-support-danger)'),
+          'target-arrow-color': resolveCssColor('var(--cds-support-danger)'),
           'width': 2,
           'opacity': 0.9,
-          'color': resolveCssColor('var(--cds-support-error)'),
+          'color': resolveCssColor('var(--cds-support-danger)'),
         }
       },
       // Premium reference — dashed purple
@@ -3316,225 +3888,85 @@ function initDependencyCytoscape(nodeMap, graphEdges) {
       {
         selector: 'node:active',
         style: { 'overlay-opacity': 0.08, 'overlay-color': '#ffffff' }
+      },
+      // Hover feedback — previously the is-hover class was toggled with no matching style
+      // rule anywhere, so hovering a node/edge gave zero visual affordance that it was
+      // clickable.
+      {
+        selector: 'node.is-hover',
+        style: {
+          'border-width': 4, 'overlay-opacity': 0.16, 'overlay-color': metering, 'overlay-padding': 8
+        }
+      },
+      {
+        selector: 'edge.is-hover',
+        style: { 'width': 3.2, 'opacity': 1 }
+      },
+      // Compound parent (a bundling product with collapsible bundled-as-RU children) —
+      // dashed container box, label pinned to the top so it doesn't collide with children.
+      {
+        selector: '$node > node',
+        style: {
+          'shape': 'round-rectangle',
+          'background-opacity': 0.12,
+          'border-width': 2,
+          'border-style': 'dashed',
+          'border-color': resolveCssColor('var(--cds-border-strong-01)'),
+          'label': 'data(label)',
+          'text-valign': 'top',
+          'text-halign': 'center',
+          'text-margin-y': -6,
+          'font-size': 10,
+          'font-weight': 600,
+          'padding': '28px',
+        }
+      },
+      {
+        selector: 'node.cy-expand-collapse-collapsed-node',
+        style: { 'border-style': 'double', 'border-width': 7 }
       }
     ]
   });
 
-  dependencyCy.on('tap', 'node', event => showDependencyNode(event.target.id()));
-  dependencyCy.on('tap', 'edge', event => showDependencyEdge(event.target.data('edgeIndex')));
+  dependencyCy.on('tap', 'node', event => { dependencyGraphHasBeenFocused = true; showDependencyNode(event.target.id()); });
+  dependencyCy.on('tap', 'edge', event => { dependencyGraphHasBeenFocused = true; showDependencyEdge(event.target.data('edgeIndex')); });
   dependencyCy.on('mouseover', 'node, edge', event => event.target.addClass('is-hover'));
   dependencyCy.on('mouseout', 'node, edge', event => event.target.removeClass('is-hover'));
-  runDependencyLayout();
-}
+  dependencyCy.on('zoom pan', updateDependencyZoomReadout);
 
-function compactLabel(label, max = 22) {
-  label = String(label || '');
-  return label.length > max ? label.slice(0, max - 3) + '...' : label;
-}
+  // Hide everything the instant it's created — ELK's layout (below) computes final positions
+  // headlessly while hidden, so the reveal in runDependencyLayout's layoutstop handler shows
+  // nodes arriving directly at their real spots instead of flashing through a jumbled
+  // default layout first.
+  dependencyCy.elements().style('opacity', 0);
 
-function wrapSvgLabel(label, max = 19) {
-  const words = String(label || '').split(/\\s+/).filter(Boolean);
-  const lines = [];
-  let current = '';
-  words.forEach(word => {
-    const next = current ? `${current} ${word}` : word;
-    if (next.length <= max || !current) {
-      current = next;
-    } else {
-      lines.push(current);
-      current = word;
-    }
-  });
-  if (current) lines.push(current);
-  if (lines.length > 2) {
-    return [lines[0], compactLabel(lines.slice(1).join(' '), max)];
-  }
-  return lines.length ? lines : [''];
-}
-
-function dependencyDepthSort(a, b) {
-  const priority = type => {
-    type = String(type || '');
-    if (type === 'metering') return 0;
-    if (type === 'platform') return 1;
-    if (type.includes('core_product')) return 2;
-    if (type.includes('dependency')) return 3;
-    if (type.includes('option') || type.includes('add_on')) return 4;
-    if (type.includes('premium')) return 5;
-    return 6;
-  };
-  return priority(a.type) - priority(b.type) || String(a.label).localeCompare(String(b.label));
-}
-
-function layoutLineage(selectedId) {
-  const nodesById = dependencyExplorerState.nodesById;
-  const edges = dependencyExplorerState.edges;
-  const selected = nodesById[selectedId] || Object.values(nodesById)[0];
-  if (!selected) return { nodes: [], edges: [] };
-  selectedId = selected.id;
-
-  const incoming = new Map();
-  const outgoing = new Map();
-  edges.forEach((edge, index) => {
-    edge.edgeIndex = edge.edgeIndex ?? index;
-    if (!incoming.has(edge.to)) incoming.set(edge.to, []);
-    if (!outgoing.has(edge.from)) outgoing.set(edge.from, []);
-    incoming.get(edge.to).push(edge);
-    outgoing.get(edge.from).push(edge);
-  });
-
-  const depthById = new Map([[selectedId, 0]]);
-  const lineageEdgeIndexes = new Set();
-  const visit = (startId, direction, maxDepth = 4) => {
-    const queue = [{ id: startId, depth: 0 }];
-    const seen = new Set([startId]);
-    while (queue.length) {
-      const current = queue.shift();
-      if (Math.abs(current.depth) >= maxDepth) continue;
-      const nextEdges = direction === 'upstream' ? (incoming.get(current.id) || []) : (outgoing.get(current.id) || []);
-      nextEdges.forEach(edge => {
-        const nextId = direction === 'upstream' ? edge.from : edge.to;
-        if (!nodesById[nextId] || seen.has(nextId)) return;
-        seen.add(nextId);
-        lineageEdgeIndexes.add(edge.edgeIndex);
-        const nextDepth = current.depth + (direction === 'upstream' ? -1 : 1);
-        const previous = depthById.get(nextId);
-        if (previous === undefined || Math.abs(nextDepth) < Math.abs(previous)) {
-          depthById.set(nextId, nextDepth);
+  if (typeof cytoscapeExpandCollapse !== 'undefined' && typeof dependencyCy.expandCollapse === 'function') {
+    dependencyExpandCollapseApi = dependencyCy.expandCollapse({
+      layoutBy: {
+        name: 'elk',
+        fit: true,
+        padding: 72,
+        animate: true,
+        animationDuration: 360,
+        elk: {
+          algorithm: 'layered',
+          'elk.direction': 'DOWN',
+          'elk.layered.crossingMinimization.strategy': 'LAYER_SWEEP',
+          'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
+          'elk.layered.spacing.nodeNodeBetweenLayers': 70,
+          'elk.spacing.nodeNode': 45,
+          'elk.edgeRouting': 'ORTHOGONAL'
         }
-        queue.push({ id: nextId, depth: nextDepth });
-      });
-    }
-  };
-
-  visit(selectedId, 'upstream');
-  visit(selectedId, 'downstream');
-
-  // Keep shared platform and metering context visible for ancestor products.
-  [...depthById.keys()].forEach(id => {
-    if ((depthById.get(id) || 0) > 0) return;
-    (outgoing.get(id) || []).forEach(edge => {
-      const target = nodesById[edge.to];
-      if (!target) return;
-      const contextType = String(target.type || '');
-      const relationship = String(edge.relationship || '');
-      if (contextType === 'metering' || relationship.includes('platform_dependency') || relationship.includes('measured_by')) {
-        const contextDepth = Math.min(-1, (depthById.get(id) || 0) + 1);
-        if (!depthById.has(edge.to)) depthById.set(edge.to, contextDepth);
-      }
+      },
+      fisheye: false,
+      animate: true,
+      animationDuration: 360,
+      undoable: false,
+      cueEnabled: true,
     });
-  });
+  }
 
-  // Foundation chains should continue left-to-right instead of stacking on top of each other.
-  edges.forEach(edge => {
-    if (!depthById.has(edge.from) || !depthById.has(edge.to)) return;
-    const fromDepth = depthById.get(edge.from);
-    const toDepth = depthById.get(edge.to);
-    if (fromDepth >= 0 && toDepth <= fromDepth && edge.from !== selectedId) {
-      depthById.set(edge.to, fromDepth + 1);
-    }
-  });
-
-  const depths = [...depthById.values()];
-  const minDepth = Math.min(...depths);
-  const maxDepth = Math.max(...depths);
-  const step = Math.min(210, 900 / Math.max(maxDepth - minDepth, 1));
-  let shift = 0;
-  const left = 540 + minDepth * step;
-  const right = 540 + maxDepth * step;
-  if (left < 90) shift = 90 - left;
-  if (right + shift > 1010) shift = 1010 - right;
-
-  const columns = new Map();
-  depthById.forEach((depth, id) => {
-    if (!columns.has(depth)) columns.set(depth, []);
-    columns.get(depth).push(nodesById[id]);
-  });
-
-  const positioned = {};
-  [...columns.entries()].forEach(([depth, columnNodes]) => {
-    const ordered = columnNodes.slice().sort(dependencyDepthSort);
-    const spacing = Math.min(92, 520 / Math.max(ordered.length - 1, 1));
-    const startY = ordered.length === 1 ? 320 : 320 - ((ordered.length - 1) * spacing) / 2;
-    ordered.forEach((node, index) => {
-      positioned[node.id] = {
-        ...node,
-        x: Math.round(540 + depth * step + shift),
-        y: node.id === selectedId ? 320 : Math.round(startY + spacing * index),
-        depth,
-        role: depth < 0 ? 'upstream' : depth > 0 ? 'dependencies' : 'selected'
-      };
-    });
-  });
-
-  const visibleIds = new Set(Object.keys(positioned));
-  const visibleEdges = edges
-    .filter(edge => visibleIds.has(edge.from) && visibleIds.has(edge.to))
-    .map(edge => ({ ...edge, isLineagePath: lineageEdgeIndexes.has(edge.edgeIndex) || edge.from === selectedId || edge.to === selectedId }));
-  return { nodes: Object.values(positioned), edges: visibleEdges, selectedId };
-}
-
-function drawDependencyLineage(selectedId) {
-  const svg = document.getElementById('dependency-graph-svg');
-  if (!svg) return;
-  const lineage = layoutLineage(selectedId);
-  const laneLabels = [
-    ['Upstream products', 170],
-    ['Selected focus', 540],
-    ['Dependencies and foundation', 890]
-  ].map(([label, x]) => `<text x="${x}" y="28" text-anchor="middle" fill="var(--cds-text-helper)" style="font-size:12px; text-transform:uppercase; letter-spacing:0.6px;">${esc(label)}</text>`).join('');
-  const nodeById = Object.fromEntries(lineage.nodes.map(node => [node.id, node]));
-  const linkHtml = lineage.edges.map((edge) => {
-    const fromNode = nodeById[edge.from];
-    const toNode = nodeById[edge.to];
-    if (!fromNode || !toNode) return '';
-    const edgeIndex = edge.edgeIndex ?? dependencyExplorerState.edges.findIndex(item => item.from === edge.from && item.to === edge.to && item.relationship === edge.relationship);
-    const fromRadius = fromNode.id === lineage.selectedId ? 34 : fromNode.installed ? 28 : 24;
-    const toRadius = toNode.id === lineage.selectedId ? 34 : toNode.installed ? 28 : 24;
-    const direction = toNode.x >= fromNode.x ? 1 : -1;
-    const sameColumn = Math.abs(toNode.x - fromNode.x) < 24;
-    const x1 = sameColumn ? fromNode.x + 42 : fromNode.x + direction * (fromRadius + 10);
-    const y1 = fromNode.y;
-    const x2 = sameColumn ? toNode.x + 42 : toNode.x - direction * (toRadius + 10);
-    const y2 = toNode.y;
-    const cx = sameColumn ? x1 + 70 : (x1 + x2) / 2;
-    const d = `M ${x1} ${y1} C ${cx} ${y1}, ${cx} ${y2}, ${x2} ${y2}`;
-    const important = edge.relationship.includes('premium') || edge.relationship.includes('restricted');
-    const selectedPath = edge.isLineagePath;
-    const className = `cds--neo-link ${important ? 'is-emphasis' : ''} ${selectedPath ? 'is-selected-path' : ''}`;
-    return `
-      <path class="cds--neo-link-hit" d="${d}" onclick="showDependencyEdge(${edgeIndex})"><title>${esc(edge.relationship)}</title></path>
-      <path class="${className}" d="${d}" marker-end="url(#dependency-arrow)"><title>${esc(edge.relationship)}</title></path>
-    `;
-  }).join('');
-  const nodeHtml = lineage.nodes.map(node => {
-    const radius = node.id === lineage.selectedId ? 34 : node.installed ? 28 : 24;
-    const status = node.option_status || (node.installed ? 'installed' : dependencyTypeLabel(node.type));
-    const labelLines = wrapSvgLabel(node.label, 19);
-    const statusLine = compactLabel(status, 22);
-    const labelWidth = Math.min(168, Math.max(96, Math.max(...labelLines.map(line => line.length), statusLine.length) * 6.2 + 18));
-    const labelHeight = 30 + labelLines.length * 13;
-    const labelY = radius + 16;
-    const textLines = labelLines.map((line, index) => `<text y="${labelY + 13 + index * 13}" text-anchor="middle">${esc(line)}</text>`).join('');
-    return `
-      <g class="cds--neo-node ${node.id === lineage.selectedId ? 'is-focus is-selected' : ''}" data-node-id="${esc(node.id)}" onclick="showDependencyNode('${esc(node.id)}')" transform="translate(${node.x} ${node.y})">
-        <circle r="${radius}" fill="${dependencyNodeColor(node)}"><title>${esc(node.label)} - ${esc(status)}</title></circle>
-        <rect class="cds--neo-label-bg" x="${-labelWidth / 2}" y="${labelY}" width="${labelWidth}" height="${labelHeight}" rx="2"></rect>
-        ${textLines}
-        <text class="cds--node-type" y="${labelY + 16 + labelLines.length * 13}" text-anchor="middle">${esc(statusLine)}</text>
-      </g>
-    `;
-  }).join('');
-  svg.innerHTML = `
-    <defs>
-      <marker id="dependency-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-        <path d="M 0 0 L 8 4 L 0 8 z" fill="var(--cds-border-strong-01)"></path>
-      </marker>
-    </defs>
-    ${laneLabels}
-    ${linkHtml}
-    ${nodeHtml}
-  `;
+  runDependencyLayout();
 }
 
 function riskColor(pct) {
@@ -3666,6 +4098,31 @@ function initPreferences() {
   document.getElementById('mode-text').innerText = savedMode === 'dark' ? 'Dark Mode' : 'Light Mode';
 }
 
+function switchView(viewName) {
+  document.querySelectorAll('.cds--view-panel').forEach(panel => {
+    panel.hidden = panel.dataset.viewPanel !== viewName;
+  });
+  document.querySelectorAll('.cds--sidenav-item').forEach(item => {
+    item.classList.toggle('is-active', item.dataset.view === viewName);
+  });
+  localStorage.setItem('cds_view', viewName);
+  if (location.hash !== '#' + viewName) history.replaceState(null, '', '#' + viewName);
+  // The dependency graph is built by the very first fetchData() cycle regardless of which
+  // view is active on load — if "graph" wasn't the active view yet, its container was
+  // display:none (0x0) when Cytoscape measured it. Re-measure now that it's actually visible.
+  if (viewName === 'graph' && dependencyCy) {
+    requestAnimationFrame(resizeDependencyGraph);
+  }
+  document.querySelector('.cds--shell-main main')?.scrollTo({ top: 0, behavior: 'instant' });
+}
+
+function initView() {
+  const fromHash = location.hash.replace('#', '');
+  const valid = ['overview', 'services', 'graph', 'compliance', 'reference'];
+  const initial = valid.includes(fromHash) ? fromHash : (localStorage.getItem('cds_view') || 'overview');
+  switchView(initial);
+}
+
 function setSimScale(scale, btn) {
   currentScaleOverride = scale;
   document.querySelectorAll('.cds--content-switcher-btn').forEach(b => b.classList.remove('cds--content-switcher--selected'));
@@ -3790,6 +4247,9 @@ async function submitCustomService() {
 }
 
 async function fetchData() {
+  const fetchBar = document.getElementById('fetch-bar');
+  fetchBar?.classList.add('is-active');
+  setLicenseStatusIndicator('loading', 'checking…');
   try {
     const res = await fetch('/api/telemetry');
     const data = await res.json();
@@ -3797,7 +4257,53 @@ async function fetchData() {
     renderDashboard(data);
   } catch (err) {
     console.error('Failed to fetch telemetry:', err);
+    setLicenseStatusIndicator('down', 'fetch failed');
+  } finally {
+    fetchBar?.classList.remove('is-active');
   }
+}
+
+function setLicenseStatusIndicator(state, text) {
+  const dot = document.getElementById('status-license-dot');
+  const label = document.getElementById('status-license-text');
+  if (dot) dot.className = 'cds--status-dot is-' + state;
+  if (label) label.textContent = text;
+}
+
+function renderStatusRail(data) {
+  const cluster = data.cluster_info || {};
+  const lic = data.licensing || {};
+  const urlEl = document.getElementById('status-cluster-url');
+  if (urlEl) {
+    const short = String(cluster.ocp_url || '').replace(/^https?:\\/\\//, '');
+    urlEl.textContent = short || '--';
+    urlEl.title = cluster.ocp_url || '';
+  }
+  const stateMap = {
+    connected: ['live', 'connected'],
+    simulated: ['simulated', 'sample data'],
+    unreachable: ['down', 'unreachable'],
+    error: ['down', 'error'],
+  };
+  const [state, label] = stateMap[lic.status] || ['simulated', lic.status || 'unknown'];
+  setLicenseStatusIndicator(state, lic.host ? `${label} – ${lic.host}`.slice(0, 40) : label);
+  const updatedEl = document.getElementById('status-updated');
+  if (updatedEl) updatedEl.textContent = (data.timestamp || '').replace(' UTC', 'Z').split(' ')[1] || data.timestamp || '--';
+  const badge = document.getElementById('nav-badge-services');
+  if (badge) badge.textContent = data.services ? Object.keys(data.services).length : '';
+}
+
+// Every render* function used to fully rebuild its target's innerHTML on every 10s poll
+// regardless of whether the underlying data actually changed, resetting any open <details>,
+// scroll position, or keyboard focus inside that subtree. renderDependencyExplorer already
+// had a one-off signature guard for this; renderIfChanged generalizes that same pattern to
+// every section so a poll that returns identical data is a no-op for the DOM.
+const lastRenderSignatures = {};
+function renderIfChanged(key, payload, fn) {
+  const signature = JSON.stringify(payload);
+  if (lastRenderSignatures[key] === signature) return;
+  lastRenderSignatures[key] = signature;
+  fn();
 }
 
 function renderDashboard(data) {
@@ -3808,9 +4314,11 @@ function renderDashboard(data) {
     populateSupportedServiceDropdown();
   }
   document.getElementById('footer-ocp-info').innerText = cluster.ocp_url;
-  renderReleaseMatrix(data.terms_info);
-  renderSourceMap(data.terms_info);
-  renderInstallOptions(data.install_options || {});
+  renderStatusRail(data);
+  renderIfChanged('releaseMatrix', data.terms_info, () => renderReleaseMatrix(data.terms_info));
+  renderIfChanged('sourceMap', data.terms_info, () => renderSourceMap(data.terms_info));
+  renderIfChanged('installOptions', data.install_options, () => renderInstallOptions(data.install_options || {}));
+  renderIfChanged('guardrails', data.terms_info?.dependency_policy, renderGuardrailsGrid);
   renderDependencyExplorer(data.dependency_explorer || {});
 
   const services = data.services;
@@ -3860,21 +4368,12 @@ function renderDashboard(data) {
   document.getElementById('mem-bar').style.width = cpuPct + '%';
   document.getElementById('mem-bar').style.backgroundColor = cpuPct >= 85 ? 'var(--cds-support-danger)' : 'var(--cds-support-success)';
 
-  renderFinanceCommandCenter(data, {
-    totalVpc,
-    totalRu,
-    vpcEntitled,
-    ruEntitled,
-    vpcPct,
-    ruPct,
-    totalCpuUsed,
-    totalCpuLimit,
-    cpuPct
-  });
-
-  renderServices(services);
-  renderLicenseTable(data.licensing.products);
-  renderApiCoverage(data.licensing.apiCoverage || []);
+  const financeMetrics = { totalVpc, totalRu, vpcEntitled, ruEntitled, vpcPct, ruPct, totalCpuUsed, totalCpuLimit, cpuPct };
+  renderIfChanged('financeCommandCenter', { data: data.licensing, financeMetrics }, () => renderFinanceCommandCenter(data, financeMetrics));
+  renderIfChanged('complianceControls', data.compliance_controls, () => renderComplianceControls(data.compliance_controls));
+  renderIfChanged('services', services, () => renderServices(services));
+  renderIfChanged('licenseTable', data.licensing.products, () => renderLicenseTable(data.licensing.products));
+  renderIfChanged('apiCoverage', data.licensing.apiCoverage, () => renderApiCoverage(data.licensing.apiCoverage || []));
 }
 
 function renderReleaseMatrix(terms) {
@@ -3893,6 +4392,57 @@ function renderReleaseMatrix(terms) {
       </div>
     </article>
   `).join('');
+}
+
+function renderComplianceControls(controls) {
+  const grid = document.getElementById('compliance-controls-grid');
+  if (!grid) return;
+  if (!controls || !controls.nodes || controls.nodes.length === 0) {
+    grid.innerHTML = '<p style="color:var(--cds-text-helper); font-size:13px;">Node data unavailable — connect to a live cluster to check node pinning and quota status.</p>';
+    return;
+  }
+  const pinIndex = addRawInspectorItem('Node pinning — per-node labels', controls.nodes);
+  const pinCard = `
+    <article class="cds--endpoint-card">
+      <div style="display:flex; justify-content:space-between; gap:8px; align-items:flex-start;">
+        <strong style="font-size:13px;">Node pinning (isc-entitlement)</strong>
+        <span class="cds--tag ${controls.nodePinningConfigured ? 'cds--tag--green' : 'cds--tag--gray'}">${controls.nodePinningConfigured ? 'configured' : 'not configured'}</span>
+      </div>
+      <p>${controls.nodePinningConfigured
+        ? `${esc(controls.pinnedNodeCount)} of ${esc(controls.nodes.length)} nodes carry an isc-entitlement label.`
+        : 'No node carries the isc-entitlement label. IBM: "optional but strongly recommended if you plan to install multiple solutions in a single instance" — not required for a single-solution instance.'}</p>
+      <div class="cds--method-row">
+        <button class="cds--method-chip" onclick="openRawInspector(${pinIndex})">View node labels</button>
+      </div>
+    </article>
+  `;
+  const quotaIndex = addRawInspectorItem('Namespace quota check', { namespaceQuotaConfigured: controls.namespaceQuotaConfigured, note: controls.namespaceQuotaNote });
+  const quotaCard = `
+    <article class="cds--endpoint-card">
+      <div style="display:flex; justify-content:space-between; gap:8px; align-items:flex-start;">
+        <strong style="font-size:13px;">Namespace resource quota</strong>
+        <span class="cds--tag ${controls.namespaceQuotaConfigured ? 'cds--tag--green' : 'cds--tag--blue'}">${controls.namespaceQuotaConfigured ? 'configured' : 'none found'}</span>
+      </div>
+      <p>${esc(controls.namespaceQuotaNote)}</p>
+      <div class="cds--method-row">
+        <button class="cds--method-chip" onclick="openRawInspector(${quotaIndex})">View detail</button>
+      </div>
+    </article>
+  `;
+  const capacityIndex = addRawInspectorItem('Worker node capacity', controls.nodes.filter(n => n.isWorker));
+  const capacityCard = `
+    <article class="cds--endpoint-card">
+      <div style="display:flex; justify-content:space-between; gap:8px; align-items:flex-start;">
+        <strong style="font-size:13px;">Worker node capacity</strong>
+        <span class="cds--tag cds--tag--gray">${esc(controls.workerNodeCount)} workers</span>
+      </div>
+      <p>${esc(controls.totalWorkerCpuCores)} vCPU / ${esc(controls.totalWorkerMemoryGiB)} GiB total across worker nodes.${controls.gpuCapableNodeCount ? ` ${esc(controls.gpuCapableNodeCount)} node(s) advertise GPU capacity.` : ' No node advertises GPU capacity — any GPU-denominated ratio (e.g. Milvus GPGPU) has no real data to validate against here.'}</p>
+      <div class="cds--method-row">
+        <button class="cds--method-chip" onclick="openRawInspector(${capacityIndex})">View nodes</button>
+      </div>
+    </article>
+  `;
+  grid.innerHTML = pinCard + quotaCard + capacityCard;
 }
 
 function renderApiCoverage(endpoints) {
@@ -3964,6 +4514,33 @@ function renderSourceMap(terms) {
   }).join('');
 }
 
+// One rule per card instead of one seven-item bullet list — the Overview page only needs to
+// know a posture badge exists; anyone reviewing the actual guardrails wants to scan them,
+// not read a paragraph-length <ul> top to bottom.
+const COMPLIANCE_GUARDRAILS = [
+  { title: 'Metric truth', tag: 'cds--tag--blue', text: 'Read IBM License Service metricName and metricQuantity as reported; keep RU and VPC totals separate, never summed together.' },
+  { title: 'Release scope', tag: 'cds--tag--gray', text: 'Covers Software Hub / CPD 5.3 with watsonx 2.3, and Software Hub / CPD 5.4 with watsonx 2.4.' },
+  { title: 'Premium guardrail', tag: 'cds--tag--purple', text: 'Never label watsonx.data as Premium unless License Service and entitlement records explicitly say Premium.' },
+  { title: 'Knowledge Catalog boundary', tag: 'cds--tag--blue', text: 'Base WKC is IBM Knowledge Catalog. Premium / model features are a separate entitlement and can involve GPU or remote model placement.' },
+  { title: 'Data quality boundary', tag: 'cds--tag--gray', text: 'Knowledge Catalog data quality can pull in DataStage components — show that as a restricted DQ dependency, separate from standalone DataStage.' },
+  { title: 'Lineage boundary', tag: 'cds--tag--gray', text: 'MANTA / data lineage is its own lineage capability, not a generic WKC data-quality toggle.' },
+  { title: 'Audit trail', tag: 'cds--tag--green', text: 'Use IBM License Service snapshot evidence for audits. Prometheus/CPU limits are sizing context, not audit evidence.' },
+];
+
+function renderGuardrailsGrid() {
+  const grid = document.getElementById('guardrails-grid');
+  if (!grid) return;
+  grid.innerHTML = COMPLIANCE_GUARDRAILS.map(g => `
+    <article class="cds--option-card">
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
+        <h3>${esc(g.title)}</h3>
+        <span class="cds--tag ${g.tag}">rule</span>
+      </div>
+      <p>${esc(g.text)}</p>
+    </article>
+  `).join('');
+}
+
 function renderInstallOptions(options) {
   const grid = document.getElementById('install-options-grid');
   const source = document.getElementById('install-options-source');
@@ -4020,7 +4597,7 @@ function renderDependencyExplorer(graph) {
   nodes.forEach(node => {
     nodeMap[node.id] = {
       ...node,
-      color: dependencyNodeColor(node),
+      color: dependencyNodeStyle(node).color(),
       rawIndex: addRawInspectorItem(`Dependency node: ${node.label}`, node),
     };
   });
@@ -4034,7 +4611,7 @@ function renderDependencyExplorer(graph) {
   const selectedId = nodeMap[previousSelectedId] ? previousSelectedId : nodes.find(node => node.id === 'watsonx_data') ? 'watsonx_data' : (nodes[0]?.id || '');
   dependencyExplorerState = { nodesById: nodeMap, edges: graphEdges, selectedId };
   if (dependencyCy && dependencyGraphSignature === graphSignature && root.querySelector('#dependency-graph-cy')) {
-    showDependencyNode(selectedId);
+    if (dependencyGraphHasBeenFocused) showDependencyNode(selectedId);
     return;
   }
   dependencyGraphSignature = graphSignature;
@@ -4059,8 +4636,6 @@ function renderDependencyExplorer(graph) {
   }).join('');
 
   const premiumEdges = edges.filter(edge => edge.relationship.includes('premium')).length;
-  const optionNodes = nodes.filter(node => node.type.includes('option')).length;
-  const dependencyNodes = nodes.filter(node => node.type.includes('dependency')).length;
 
   const editionLabel = graph.edition_label || '';
   root.innerHTML = `
@@ -4077,38 +4652,31 @@ function renderDependencyExplorer(graph) {
     <div class="cds--neo-layout">
       <div class="cds--neo-canvas">
         <div class="cds--graph-controls">
+          <button class="cds--raw-link" onclick="collapseDependencyBundles()" title="Collapse each bundled-as-RU group into one node">Collapse bundles</button>
+          <button class="cds--raw-link" onclick="expandDependencyGraph()" title="Expand all collapsed bundle groups">Expand all</button>
           <button class="cds--raw-link" onclick="runDependencyLayout()">Re-layout</button>
           <button class="cds--raw-link" onclick="fitDependencyGraph()">Fit</button>
+          <button class="cds--raw-link" onclick="zoomDependencyGraph(0.8)" title="Zoom out" aria-label="Zoom out">&minus;</button>
+          <span class="cds--zoom-readout" id="dependency-zoom-readout">100%</span>
+          <button class="cds--raw-link" onclick="zoomDependencyGraph(1.25)" title="Zoom in" aria-label="Zoom in">&plus;</button>
         </div>
-        <div id="dependency-graph-cy" role="img" aria-label="Interactive product dependency graph"></div>
+        <div id="dependency-graph-cy" role="img" aria-label="Interactive product dependency graph. Scroll or pinch to zoom, drag to pan, click a node or edge for detail. A full text list of every relationship follows below the graph for screen-reader and keyboard use."></div>
       </div>
       <aside class="cds--neo-side">
         <h3>How to read the graph</h3>
-        <p>Only active components shown, filtered by live CRs and <code>WXD_EDITION</code>. Click any node or edge for details.</p>
+        <p>Only active components shown, filtered by live CRs and <code>WXD_EDITION</code>. Scroll/pinch to zoom, drag to pan, click any node or edge for detail, or use the text list below the graph.</p>
         <div class="cds--neo-legend" style="flex-direction:column; gap:6px; margin-top:10px;">
-          <strong style="font-size:11px; color:var(--cds-text-secondary); text-transform:uppercase; letter-spacing:0.5px;">Node shapes</strong>
-          <span><span class="cds--legend-dot" style="background:var(--cds-interactive-01); border-radius:3px;"></span>Core product (rounded rect)</span>
-          <span><span class="cds--legend-dot" style="background:#0e7490;"></span>Integration bundle (hexagon)</span>
-          <span><span class="cds--legend-dot" style="background:#7c3aed; transform:rotate(45deg); border-radius:1px; display:inline-block;"></span>Premium reference (diamond)</span>
-          <span><span class="cds--legend-dot" style="background:var(--cds-layer-02); border:1px solid var(--cds-border-subtle-01);"></span>Platform / metering (barrel)</span>
-          <strong style="font-size:11px; color:var(--cds-text-secondary); text-transform:uppercase; letter-spacing:0.5px; margin-top:6px;">Edge styles</strong>
-          <span><span style="display:inline-block;width:22px;height:3px;background:#0e7490;margin-right:6px;vertical-align:middle;"></span>Bundled as RU — solid teal</span>
-          <span><span style="display:inline-block;width:22px;height:3px;background:var(--cds-interactive-01);margin-right:6px;vertical-align:middle;"></span>Edition uplift — solid blue</span>
-          <span><span style="display:inline-block;width:22px;height:0;border-top:2px dashed #6366f1;margin-right:6px;vertical-align:middle;"></span>Optional / add-on — dashed indigo</span>
-          <span><span style="display:inline-block;width:22px;height:0;border-top:2px dashed #7c3aed;margin-right:6px;vertical-align:middle;"></span>Premium reference — dashed purple</span>
-          <span><span style="display:inline-block;width:22px;height:0;border-top:2px dashed red;margin-right:6px;vertical-align:middle;"></span>Restricted dep — dashed red</span>
-          <span><span style="display:inline-block;width:22px;height:0;border-top:2px dotted var(--cds-border-subtle-01);margin-right:6px;vertical-align:middle;"></span>Platform dep — dotted (unlabelled)</span>
-          <span><span style="display:inline-block;width:22px;height:0;border-top:2px dashed var(--cds-support-success);margin-right:6px;vertical-align:middle;"></span>Metering — dashed green</span>
-          <strong style="font-size:11px; color:var(--cds-text-secondary); text-transform:uppercase; letter-spacing:0.5px; margin-top:6px;">Border</strong>
-          <span><span class="cds--legend-dot" style="background:transparent; border:3px solid var(--cds-support-success);"></span>Thick green = live installed CR</span>
+          ${renderDependencyLegend()}
         </div>
         <div id="dependency-detail-panel"></div>
       </aside>
     </div>
+    <h3 style="margin:var(--cds-spacing-06) 0 var(--cds-spacing-03);">Full relationship list (text / accessible view)</h3>
+    <p style="font-size:12px; color:var(--cds-text-secondary); margin-bottom:var(--cds-spacing-04);">Every edge in the graph above, as plain text — the source of truth for screen readers, keyboard navigation, and anyone who prefers a list to a canvas.</p>
     <div class="cds--relationship-list">${relationshipCards}</div>
   `;
   initDependencyCytoscape(nodeMap, graphEdges);
-  showDependencyNode(dependencyExplorerState.selectedId);
+  if (dependencyGraphHasBeenFocused) showDependencyNode(dependencyExplorerState.selectedId);
 }
 
 function renderServices(services) {
@@ -4206,31 +4774,57 @@ function renderServices(services) {
 }
 
 function renderLicenseTable(products) {
-  const tbody = document.getElementById('lic-table-body');
-  tbody.innerHTML = '';
+  const grid = document.getElementById('license-products-grid');
   if (!products || products.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color:var(--cds-text-helper);">No products registered</td></tr>';
+    grid.innerHTML = '<p style="color:var(--cds-text-helper); font-size:13px;">No products registered yet — connect to a live IBM License Service instance, or check the API Coverage section above for why.</p>';
     return;
   }
-  products.forEach(p => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td style="font-weight:600;">${esc(p.name)}</td>
-      <td><code class="cds--snippet">${esc(p.id || p.productId || 'n/a')}</code></td>
-      <td><span class="cds--tag cds--tag--purple">${esc(p.edition || p.release || 'Reported')}</span></td>
-      <td>${esc(p.metricName || 'Reported')}</td>
-      <td style="font-weight:600; color:var(--cds-interactive-01); font-family:var(--cds-font-mono);">${esc(p.metricQuantity ?? 0)} ${esc(p.metricName || '')}</td>
-      <td><span class="cds--tag cds--tag--green">${esc(p.status || 'Reported')}</span></td>
+  grid.innerHTML = products.map(p => {
+    const metricLabel = p.metricNameNormalized || p.metricName || 'Reported';
+    const rawIndex = addRawInspectorItem(`License Service product: ${p.name}`, p);
+    return `
+      <article class="cds--endpoint-card" onclick="openRawInspector(${rawIndex})" style="cursor:pointer;">
+        <div style="display:flex; justify-content:space-between; gap:8px; align-items:flex-start;">
+          <strong style="font-size:13px;">${esc(p.name)}</strong>
+          <span class="cds--tag cds--tag--green">${esc(p.status || 'Reported')}</span>
+        </div>
+        <p style="font-family:var(--cds-font-mono); font-size:11px; margin-top:4px;">${esc(p.id || p.productId || 'n/a')}</p>
+        <div class="cds--method-row" style="margin-top:8px;">
+          <span class="cds--tag cds--tag--purple">${esc(p.edition || p.release || 'Reported')}</span>
+          <span class="cds--tag cds--tag--blue">${esc(p.metricName || 'Reported')}</span>
+        </div>
+        <p style="margin-top:10px; font-weight:600; color:var(--cds-interactive-01); font-family:var(--cds-font-mono); font-size:16px;">${esc(p.metricQuantity ?? 0)} ${esc(metricLabel)}</p>
+        ${p.metricPeakDate ? `<p style="margin-top:4px; color:var(--cds-text-helper); font-size:11px;">Peak reported: ${esc(p.metricPeakDate)}</p>` : ''}
+      </article>
     `;
-    tbody.appendChild(tr);
-  });
+  }).join('');
 }
 
-function exportSnapshot() {
+async function exportSnapshot() {
+  // Prefer the real IBM License Service /snapshot package (a signed ZIP — see
+  // fetch_license_snapshot in server.py) when reachable; it's IBM's own audit evidence, not a
+  // reconstruction. Fall back to a clearly-labeled local JSON reconstruction otherwise.
+  try {
+    const resp = await fetch('/api/audit/export');
+    if (resp.ok) {
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `ibm-licensing-service-snapshot-${new Date().toISOString().slice(0, 10)}.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
+  } catch (e) {
+    console.warn('IBM License Service /snapshot unreachable, falling back to local reconstruction', e);
+  }
   if (!rawData) return;
   const snapshot = {
     export_timestamp: new Date().toISOString(),
-    audit_period_retention_days: 90,
+    warning: "IBM License Service /snapshot was unreachable — this is a LOCALLY ASSEMBLED reconstruction from this dashboard's own telemetry, NOT an IBM-signed audit package. Connect to a live License Service instance for the authoritative signed ZIP.",
+    audit_reporting_window: 'calendar quarter (per IBM container-licensing policy)',
+    audit_retention_years: 2,
     cluster_metadata: rawData.cluster_info,
     terms_reference: rawData.terms_info,
     services_crd_sizing: rawData.services,
@@ -4240,14 +4834,24 @@ function exportSnapshot() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `ibm-software-hub-audit-snapshot-${new Date().toISOString().slice(0,10)}.json`;
+  a.download = `ibm-software-hub-audit-snapshot-LOCAL-RECONSTRUCTION-${new Date().toISOString().slice(0,10)}.json`;
   a.click();
   URL.revokeObjectURL(url);
 }
 
 initPreferences();
+initView();
 fetchData();
 setInterval(fetchData, 10000);
+
+// Previously nothing ever told cytoscape its container had changed size — the graph could
+// render at a stale width after a viewport resize or the 900px layout breakpoint collapsing
+// .cds--neo-layout to one column. Debounced so a drag-resize doesn't thrash ELK's layout.
+let dependencyResizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(dependencyResizeTimer);
+  dependencyResizeTimer = setTimeout(resizeDependencyGraph, 200);
+});
 </script>
 </body>
 </html>
@@ -4277,6 +4881,19 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"status": "healthy"}')
+        elif parsed.path == "/api/audit/export":
+            result = self.collector.fetch_license_snapshot()
+            if result.get("status") == "ok":
+                self.send_response(200)
+                self.send_header("Content-Type", result.get("contentType", "application/zip"))
+                self.send_header("Content-Disposition", 'attachment; filename="ibm-license-service-snapshot.zip"')
+                self.end_headers()
+                self.wfile.write(result["bytes"])
+            else:
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": result.get("status", "error"), "message": result.get("reason", "IBM License Service /snapshot unavailable.")}).encode("utf-8"))
         elif parsed.path.startswith("/vendor/"):
             rel_path = urllib.parse.unquote(parsed.path.removeprefix("/vendor/"))
             asset_path = os.path.abspath(os.path.join(VENDOR_DIR, rel_path))
@@ -4337,7 +4954,11 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
 
 
 def run_dashboard(port=DEFAULT_PORT, host=DEFAULT_HOST):
-    server = HTTPServer((host, port), DashboardHTTPHandler)
+    # ThreadingHTTPServer, not HTTPServer: the plain single-threaded server serializes every
+    # request behind whichever one is currently blocked on an `oc`/urllib call (up to the 8s
+    # timeouts used throughout ClusterTelemetryCollector) — that included /vendor/* asset
+    # requests stalling behind an in-flight /api/telemetry poll on a slow/unreachable cluster.
+    server = ThreadingHTTPServer((host, port), DashboardHTTPHandler)
     print("=" * 64)
     print(" IBM Software Hub & watsonx.data Telemetry Dashboard")
     print(f" • Local UI:         http://localhost:{port}")

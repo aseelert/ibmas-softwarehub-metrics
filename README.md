@@ -13,8 +13,11 @@ Built on the official **IBM Carbon Design System v11** and **IBM Plex typography
 
 ## ⚡ Key Highlights
 
-- **Zero External Dependencies** — Runs on the Python 3 standard library only (`http.server`, `urllib`, `json`, `subprocess`). No mandatory `pip` packages, no Node.js, no internet connection required — ideal for air-gapped clusters.
-- **IBM Carbon v11 Native UI** — Responsive UI shell, tabs, Carbon data tables, linear progress bars, tag components, and dark/light mode toggle.
+- **Zero Python Dependencies** — The server runs on the Python 3 standard library only (`http.server`, `urllib`, `json`, `subprocess`). No mandatory `pip` packages, no internet connection needed at runtime — ideal for air-gapped clusters. The dependency graph's rendering library (Cytoscape.js + ELK layout) is vendored as static JS in `app/vendor/` for the same reason — no CDN, no npm install.
+- **App-shell UI with persistent navigation** — A left sidebar (Overview, Services, Dependency Graph, Compliance & Audit, Reference) replaces a single long scroll, with a live status rail (cluster URL, License Service connection state, last-updated time) and an animated fetch indicator so a slow poll never looks like a frozen page.
+- **Interactive dependency graph** — Cytoscape.js with an ELK layered layout, gradient node fills, click-to-focus lineage highlighting, collapsible bundled-component groups, zoom controls, and a full text/table fallback view for accessibility.
+- **Real compliance checks, not just metering** — Beyond IBM License Service VPC/RU numbers, it checks live node-pinning configuration (`isc-entitlement` labels) and namespace resource quota presence against IBM's own documented entitlement-application mechanism.
+- **IBM Carbon-inspired UI** — IBM Plex typography, Carbon-style cards/tags/progress bars, and a dark/light mode toggle.
 - **Dual-Mode Operation** — Automatically queries live OpenShift APIs when `oc` is logged in, or falls back to built-in simulation/mock mode for offline sizing reviews and presentations.
 
 ---
@@ -109,6 +112,44 @@ Open your browser at **`http://localhost:8088`** (or your chosen port).
 
 ---
 
+## 🔌 Ports & Network Access
+
+| Port | Direction | Purpose | Required? |
+|---|---|---|---|
+| `8088` | Inbound to this app | The dashboard UI + API, served to your browser | Always (or whichever port you choose) |
+| `6443` | Outbound to cluster | OpenShift API server (`oc login`, `oc get ...`) | Always, for live mode |
+| `18080` → cluster `8080` | Outbound via `oc port-forward` | IBM License Service API | Only if the License Service Route's `apps.*` domain doesn't resolve from where this runs (common when running from a laptop outside the cluster's DNS) |
+| `19091` → cluster `9091` | Outbound via `oc port-forward` | OpenShift Thanos/Prometheus (CPU/memory telemetry) | Same caveat as above |
+
+**Symptom that means you need one of the fixes below**: the "IBM License Service — registered products" section shows *"No products registered yet"* and the licensing status is `unreachable` (not `simulated` — `unreachable` means the host and token both resolved but the actual HTTPS calls failed). This happens when your machine can resolve the cluster's `api.*` apiserver hostname (so `oc login`/`oc get` work fine) but *not* its `apps.*` wildcard route domain — a DNS-scoping gap some corporate/VPN networks have, not a cluster problem.
+
+**Option A — `/etc/hosts` entry (permanent, no background process to keep running).** Find your cluster's ingress IP — it's whatever IP your other `*.apps.<your-cluster-domain>` routes already resolve to, or ask whoever manages the cluster/VPN — then add two lines mapping that IP to the two routes this app needs:
+```bash
+sudo sh -c 'cat >> /etc/hosts <<EOF
+<ingress-ip>  ibm-licensing-service-instance-ibm-licensing.apps.<your-cluster-domain>
+<ingress-ip>  thanos-querier-openshift-monitoring.apps.<your-cluster-domain>
+EOF'
+```
+Get the exact two hostnames for your cluster with:
+```bash
+oc get route ibm-licensing-service-instance -n ibm-licensing -o jsonpath='{.spec.host}'
+oc get route thanos-querier -n openshift-monitoring -o jsonpath='{.spec.host}'
+```
+No `.env` changes or restart-dependent background processes needed — once `/etc/hosts` resolves them, the dashboard talks to the Routes directly.
+
+**Option B — `oc port-forward` (quicker to try, but must keep running in a terminal):**
+```bash
+oc port-forward -n ibm-licensing svc/ibm-licensing-service-instance 18080:8080
+oc port-forward -n openshift-monitoring svc/thanos-querier 19091:9091
+```
+Then uncomment in `.env` and restart the dashboard:
+```bash
+LICENSE_SERVICE_HOST=localhost:18080
+THANOS_HOST=localhost:19091
+```
+
+---
+
 ## 🔧 Environment Variables Reference
 
 The dashboard reads variables from `.env` (auto-loaded at startup) or from the shell environment. Every variable has a built-in default, so the dashboard starts with an empty `.env` — but the **Required** variables should be set for accurate results.
@@ -154,7 +195,7 @@ The dashboard reads variables from `.env` (auto-loaded at startup) or from the s
 │ /products                │   │ container_spec_cpu_quota     │
 │ /bundled_products        │   │ container_memory_working_set │
 │ /services                │   │ node_cpu_utilization_percent │
-│ /snapshot (30/90-day)    │   │ pod_phase_status & restarts  │
+│ /snapshot (signed ZIP)   │   │ pod_phase_status & restarts  │
 │ /health & /status        │   │                              │
 └──────────────────────────┘   └──────────────────────────────┘
                │                               │
@@ -164,10 +205,16 @@ The dashboard reads variables from `.env` (auto-loaded at startup) or from the s
 │                    Live Custom Resource (CR) Discovery                      │
 │                    (ns: cpd-instance / operands)                            │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ watsonx.data (wxd)   — spec.scaleConfig (small_mincpureq / small / medium) │
-│ IBM Knowledge Catalog (wkc) — spec.scale & data quality engine status      │
-│ DataStage Enterprise — Standalone vs. WKC-bundled execution                │
-│ Common Core Services (ccs) — Shared zero-VPC foundation microservices      │
+│ watsonx.data (Wxd CRD, watsonxdata.ibm.com) — spec.scaleConfig             │
+│ IBM Knowledge Catalog (WKC, wkc.wkc.cpd.ibm.com) — data quality status     │
+│ DataStage Enterprise (ds.cpd.ibm.com) — standalone vs. WKC-bundled         │
+│ Common Core Services (CCS, ccs.ccs.cpd.ibm.com) — shared platform base    │
+└──────────────────────────────┬──────────────────────────────────────────────┘
+                               ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              Node-level compliance checks (oc get nodes)                    │
+│  isc-entitlement node-pinning labels · namespace ResourceQuota/LimitRange   │
+│  · raw worker CPU/memory capacity (used when no namespace quota exists)     │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -177,8 +224,8 @@ The dashboard reads variables from `.env` (auto-loaded at startup) or from the s
 
 ### watsonx.data Standard vs. Premium
 
-- **Standard Edition** (default): Open lakehouse architecture, Apache Iceberg tables, Presto query engine, standard object storage integrations.
-- **Premium Edition**: Governed by IBM License Information Document `L-PCPF-BJV4WW`. Adds Milvus vector database, advanced governance, and vector search acceleration.
+- **Standard Edition** (default): "A single watsonx.data license is equal to 1 VPC" (IBM docs). Presto (Java/C++) and Spark engines convert to VPC at documented ratios; a flat 20 VPC "Core" floor applies regardless of engine count. Milvus is licensed here too, at its own VPC-denominated ratio — it is **not** Premium-exclusive.
+- **Premium Edition**: Governed by IBM License Information Document `L-PCPF-BJV4WW` (Program 5900-BQE). Meters Milvus at a higher, RU-pool-denominated ratio instead of Standard's flat VPC ratio, and adds advanced governance/vector-search capabilities. Verify the current document ID against IBM's CSOL system before citing it — these get superseded by "Update" revisions without the change always propagating to IBM's own index pages.
 
 ### Common Core Services (CCS)
 
@@ -209,12 +256,18 @@ pytest tests/
 ```
 ibmas-softwarehub-metrics/
 ├── app/
-│   └── server.py                            # Complete Carbon v11 server & telemetry engine
+│   ├── server.py                            # Complete server, HTML/CSS/JS & telemetry engine
+│   └── vendor/                               # Vendored JS (no CDN/npm at runtime)
+│       ├── cytoscape.min.js                 # Graph rendering
+│       ├── elk.bundled.js                   # ELK layered-DAG layout engine
+│       ├── cytoscape-elk.js                 # Cytoscape ↔ ELK adapter
+│       └── cytoscape-expand-collapse.js     # Collapsible bundled-component groups
 ├── bin/
 │   └── start-dashboard.sh                   # Launcher — auto-creates/activates venv, loads .env
 ├── config/
 │   ├── cpd_vars.example.sh                  # OpenShift & CPD environment template
 │   └── install-options.watsonx-data-no-gpu.yml  # Sizing profile definition
+├── design-system/                            # UI/UX design-system reference (tokens, patterns)
 ├── tests/
 │   └── test_server.py                       # Unit test suite
 ├── .env.example                             # Annotated environment variable template
