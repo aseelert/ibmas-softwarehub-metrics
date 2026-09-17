@@ -369,6 +369,15 @@ INSTALL_OPTIONS_CATALOG = [
         "default_status": "TBD",
         "dependency_impact": "Model-driven catalog features can require GPU, remote watsonx.ai, or CPU placement depending on release and option.",
         "license_boundary": "Treat as Premium/model uplift unless License Service and IBM terms confirm base entitlement."
+    },
+    {
+        "id": "scheduler",
+        "label": "IBM CPD Scheduling Service",
+        "component": "scheduler",
+        "option": "cpd-cli manage apply-scheduler / --components=cpfs,scheduler,cpd_platform",
+        "default_status": "TBD",
+        "dependency_impact": "Cluster-wide pod-scheduling enhancement (quota enforcement, Watson Machine Learning Accelerator co-scheduling). Installed once per cluster in its own ibm-cpd-scheduler namespace — shared by every Cloud Pak for Data / Software Hub instance on the cluster, not scoped to one cpd-instance project. Depends on CPFS; install order is cpfs, scheduler, cpd_platform.",
+        "license_boundary": "Not itself a License Service metered product; required only if Watson Machine Learning Accelerator's co-scheduling feature is used — do not infer a separate license row from its presence."
     }
 ]
 
@@ -445,6 +454,7 @@ DEPENDENCY_EXPLORER_CATALOG = {
         {"id": "ccs",                    "label": "Common Core Services",             "type": "platform_dependency",         "metering": "Foundational service; attribute to parent products unless reported",                   "certainty": "IBM component dependency context"},
         {"id": "zen",                    "label": "Software Hub Control Plane",       "type": "platform_dependency",         "metering": "Platform foundation; not a product conversion rule",                                  "certainty": "IBM component dependency context"},
         {"id": "opensearch",             "label": "OpenSearch",                       "type": "platform_dependency",         "metering": "Supporting dependency unless reported",                                               "certainty": "platform dependency context"},
+        {"id": "scheduler",              "label": "IBM CPD Scheduling Service",       "type": "optional_install_option",     "metering": "Not License-Service metered; optional, required only for WML Accelerator co-scheduling", "certainty": "IBM docs (cpd-cli manage apply-scheduler) + live CR in its own ibm-cpd-scheduler namespace"},
         # watsonx.data editions (4 distinct PA entitlements)
         {"id": "watsonx_data",           "label": "watsonx.data (Lakehouse)",         "type": "core_product",                "metering": "RU — base lakehouse (Presto, Iceberg, MinIO, OpenSearch)",                            "certainty": "IBM release license pages"},
         {"id": "watsonx_data_premium",   "label": "watsonx.data Premium",             "type": "premium_reference",           "metering": "RU (higher tier) — adds Milvus vector DB; governed by L-PCPF-BJV4WW",                "certainty": "IBM Premium LI reference"},
@@ -476,6 +486,7 @@ DEPENDENCY_EXPLORER_CATALOG = {
         {"from": "software_hub",          "to": "ccs",                   "relationship": "platform_dependency",     "license_boundary": "All Software Hub services share Common Core Services as foundation."},
         {"from": "software_hub",          "to": "zen",                   "relationship": "platform_dependency",     "license_boundary": "Zen provides the Software Hub control plane and shared UI."},
         {"from": "ccs",                   "to": "zen",                   "relationship": "foundation_dependency",   "license_boundary": "Common Core Services are part of the shared platform foundation."},
+        {"from": "software_hub",          "to": "scheduler",             "relationship": "optional_install_option", "license_boundary": "Cluster-wide, once-per-cluster scheduling enhancement in its own ibm-cpd-scheduler namespace; not a separate License Service row."},
         # watsonx.data Lakehouse (base)
         {"from": "software_hub",          "to": "watsonx_data",          "relationship": "deploys_product",         "license_boundary": "Standard/non-premium by default; RU metric."},
         {"from": "watsonx_data",          "to": "opensearch",            "relationship": "platform_dependency",     "license_boundary": "Supporting service for metadata/audit; avoid double counting."},
@@ -1229,7 +1240,8 @@ class ClusterTelemetryCollector:
         return {"status": status, "evidence": evidence}
 
     def get_install_options_overview(self, wkc_features: Optional[Dict[str, Any]] = None,
-                                      milvus_status: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                                      milvus_status: Optional[Dict[str, Any]] = None,
+                                      scheduler_status: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         local = self.read_local_install_options()
         text = local.get("text", "")
         components = os.environ.get("COMPONENTS", "")
@@ -1264,6 +1276,9 @@ class ClusterTelemetryCollector:
             elif option["id"] == "lite_milvus" and milvus_status is not None and milvus_status.get("reachable"):
                 entry["status"] = "configured" if milvus_status["enabled"] else "not enabled"
                 entry["evidence"] = f"Live-verified against wxdengines.watsonxdata.ibm.com: {milvus_status['evidence']}"
+            elif option["id"] == "scheduler" and scheduler_status is not None and scheduler_status.get("reachable"):
+                entry["status"] = "configured" if scheduler_status["enabled"] else "not enabled"
+                entry["evidence"] = f"Live-verified against scheduling.scheduler.spectrumcomputing.ibm.com in ns ibm-cpd-scheduler: {scheduler_status['evidence']}"
             entries.append(entry)
 
         return {
@@ -1322,7 +1337,7 @@ class ClusterTelemetryCollector:
 
         # Determine which catalog node IDs are "active" based on installed CRs + WXD_EDITION
         # Always include platform backbone
-        active_ids: set = {"software_hub", "license_service", "ccs", "zen", "opensearch"}
+        active_ids: set = {"software_hub", "license_service", "ccs", "zen", "opensearch", "scheduler"}
 
         # Add installed CRs and map KNOWN_SERVICES_CATALOG ids to dep-explorer ids
         cr_to_dep = {
@@ -1361,21 +1376,18 @@ class ClusterTelemetryCollector:
                     active_ids.add("datastage_ent")
                     active_ids.add("data_quality")
 
-        # ── Graph simplification ─────────────────────────────────────────────
-        # zen (Software Hub Control Plane) and ccs (Common Core Services) are
-        # omitted as separate nodes. Instead, software_hub acts as the single
-        # platform root. Any edge that previously pointed to/from zen or ccs
-        # is redirected to software_hub so products still show their platform
-        # dependency without creating a noisy fan-out cluster.
-        COLLAPSED_INTO_HUB = {"zen", "ccs"}
+        # zen (Software Hub Control Plane) and ccs (Common Core Services) used to be folded
+        # into software_hub to reduce clutter in the old static 2D layout — but that silently
+        # dropped every software_hub<->ccs/zen edge as a "self-loop" once both endpoints
+        # rerouted to the same node, so selecting Software Hub never showed its two real
+        # platform dependencies. The 3D physics layout (labels + drag-to-rearrange) handles
+        # the extra nodes fine, so show them for real instead.
 
-        # Build annotated node list — only active nodes, zen/ccs suppressed
+        # Build annotated node list — only active nodes
         nodes = []
         for node in DEPENDENCY_EXPLORER_CATALOG["nodes"]:
             if node["id"] not in active_ids:
                 continue
-            if node["id"] in COLLAPSED_INTO_HUB:
-                continue  # folded into software_hub
             option = option_status.get(node["id"])
             installed = node["id"] in installed_ids or node["id"] in cr_to_dep.values()
             nodes.append({
@@ -1385,22 +1397,15 @@ class ClusterTelemetryCollector:
                 "evidence": option.get("evidence") if option else "Relationship catalog entry; verify with live CRs, install-options, entitlement, and License Service rows.",
             })
 
-        # Build edges — reroute zen/ccs refs → software_hub, deduplicate, skip self-loops
+        # Build edges — deduplicate, skip self-loops
         seen_edges: set = set()
         edges = []
         for edge in DEPENDENCY_EXPLORER_CATALOG["edges"]:
             src = edge["from"]
             tgt = edge["to"]
-            # Reroute collapsed nodes
-            if src in COLLAPSED_INTO_HUB:
-                src = "software_hub"
-            if tgt in COLLAPSED_INTO_HUB:
-                tgt = "software_hub"
-            # Skip if either endpoint not active (after rerouting)
-            active_node_ids = {n["id"] for n in nodes} | {"software_hub"}
+            active_node_ids = {n["id"] for n in nodes}
             if src not in active_node_ids or tgt not in active_node_ids:
                 continue
-            # Skip self-loops (e.g. software_hub → software_hub after collapse)
             if src == tgt:
                 continue
             # Deduplicate — same src/tgt/relationship only once
@@ -1753,6 +1758,40 @@ class ClusterTelemetryCollector:
             ),
         }
 
+    def get_live_scheduler_status(self) -> Dict[str, Any]:
+        """The IBM Cloud Pak for Data Scheduling Service (component id "scheduler") is
+        installed once per cluster, shared by every CPD/Software Hub instance — it lives in
+        its own fixed ibm-cpd-scheduler namespace, not this collector's usual per-instance
+        namespace_cpd. Found live on a real cluster after being completely unmodeled: a
+        Scheduling CR named ibm-cpd-scheduler (scheduler.spectrumcomputing.ibm.com/v1) with
+        6 Running pods (scheduler, webhooks, metrics, resource collector)."""
+        scheduling_json = self.run_cmd(["oc", "get", "scheduling.scheduler.spectrumcomputing.ibm.com",
+                                         "-n", "ibm-cpd-scheduler", "-o", "json"])
+        reachable = False
+        instance_name = None
+        status_phase = None
+        if scheduling_json:
+            try:
+                items = json.loads(scheduling_json).get("items", [])
+                reachable = True
+                if items:
+                    instance_name = items[0].get("metadata", {}).get("name")
+                    status_phase = items[0].get("status", {}).get("cpd-schedulingStatus")
+            except Exception:
+                pass
+        enabled = status_phase == "Completed"
+        return {
+            "reachable": reachable,
+            "instance_name": instance_name,
+            "status_phase": status_phase,
+            "enabled": enabled,
+            "evidence": (
+                f"Scheduling CR '{instance_name}' in namespace ibm-cpd-scheduler, status={status_phase}."
+                if instance_name else
+                "No Scheduling CR found in the ibm-cpd-scheduler namespace — the optional scheduling service is not installed on this cluster."
+            ),
+        }
+
     def get_cr_yaml(self, service_id: str, cr_name: Optional[str] = None) -> Dict[str, Any]:
         """Fetches the real, live YAML for a service's Custom Resource on demand — not baked
         into the telemetry poll payload (CRs can be large; most cards are never clicked)."""
@@ -1781,7 +1820,8 @@ class ClusterTelemetryCollector:
         supported_services = self.get_supported_services(services)
         wkc_features = self.get_wkc_feature_status()
         milvus_status = self.get_live_milvus_status()
-        install_options = self.get_install_options_overview(wkc_features, milvus_status)
+        scheduler_status = self.get_live_scheduler_status()
+        install_options = self.get_install_options_overview(wkc_features, milvus_status, scheduler_status)
         dependency_explorer = self.get_dependency_explorer(services, install_options)
         compliance_controls = self.get_cluster_compliance_controls()
 
@@ -2171,6 +2211,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     margin: 0 auto;
     padding: var(--cds-spacing-06);
   }
+  /* The 3D dependency graph is the one view where the shared 1440px content cap actively
+     hurts — a physics-simulated scene wants real screen real estate, not the width tuned for
+     text and cards. Toggled onto <main> only while the graph view is active (see switchView). */
+  .cds--grid--wide {
+    max-width: none;
+  }
 
   .cds--page-header {
     margin-bottom: var(--cds-spacing-06);
@@ -2447,7 +2493,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   }
   .cds--neo-layout {
     display: grid;
-    grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.7fr);
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
     gap: 1px;
     background: var(--cds-border-subtle-01);
   }
@@ -3982,6 +4028,13 @@ function initDependencyGraph3D(nodeMap, graphEdges) {
       .width(container.clientWidth)
       .height(container.clientHeight);
 
+    // Default charge/link-distance settle nodes too close together for their text labels to
+    // stay legible once the graph has a dozen-plus nodes (every WKC sub-feature, CCS, Zen and
+    // the scheduler all show up as siblings around software_hub). Stronger repulsion and
+    // longer links give each label room without changing anything about how drag/orbit feel.
+    dependencyGraph3D.d3Force('charge').strength(-220);
+    dependencyGraph3D.d3Force('link').distance(90);
+
     const labelsLayer = document.createElement('div');
     labelsLayer.className = 'cds--graph-labels-layer';
     container.appendChild(labelsLayer);
@@ -4148,13 +4201,18 @@ function switchView(viewName) {
   });
   localStorage.setItem('cds_view', viewName);
   if (location.hash !== '#' + viewName) history.replaceState(null, '', '#' + viewName);
+  // The graph needs real screen width to be worth presenting in a demo — the shared 1440px
+  // content cap that suits text-and-cards views leaves a physics-simulated 3D scene cramped
+  // and mostly-empty on any wide monitor. Widen just the <main> wrapper for this one view.
+  const main = document.querySelector('.cds--shell-main main');
+  main?.classList.toggle('cds--grid--wide', viewName === 'graph');
   // The dependency graph is built by the very first fetchData() cycle regardless of which
   // view is active on load — if "graph" wasn't the active view yet, its container was
   // display:none (0x0) when Cytoscape measured it. Re-measure now that it's actually visible.
   if (viewName === 'graph' && dependencyGraph3D) {
     requestAnimationFrame(resizeDependencyGraph);
   }
-  document.querySelector('.cds--shell-main main')?.scrollTo({ top: 0, behavior: 'instant' });
+  main?.scrollTo({ top: 0, behavior: 'instant' });
 }
 
 function initView() {
