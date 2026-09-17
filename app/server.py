@@ -1228,12 +1228,26 @@ class ClusterTelemetryCollector:
 
         return {"status": status, "evidence": evidence}
 
-    def get_install_options_overview(self) -> Dict[str, Any]:
+    def get_install_options_overview(self, wkc_features: Optional[Dict[str, Any]] = None,
+                                      milvus_status: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         local = self.read_local_install_options()
         text = local.get("text", "")
         components = os.environ.get("COMPONENTS", "")
         ikc_type = os.environ.get("IKC_TYPE", "")
         entries = []
+
+        # Several of these rows started life as static "TBD"/YAML-text guesses — the static
+        # install-options file can say enable_lite_milvus: false while a real Milvus WxdEngine
+        # runs on the cluster (provisioned another way), or a WKC sub-CRD can exist and report
+        # Completed while functionally disabled (see get_wkc_feature_status's docstring). Once
+        # a live cluster check has run, its verdict overrides the static guess here.
+        wkc_feature_by_id = {f["id"]: f for f in (wkc_features or {}).get("features", [])}
+        reference_to_live_id = {
+            "data_quality": "data_quality",
+            "knowledge_graph": "knowledge_graph",
+            "lineage": "data_lineage",
+            "neo4j": "neo4j",
+        }
 
         for option in INSTALL_OPTIONS_CATALOG:
             inferred = self.infer_option_status(option, text, components)
@@ -1242,6 +1256,14 @@ class ClusterTelemetryCollector:
                 "status": inferred["status"],
                 "evidence": inferred["evidence"],
             }
+            live_id = reference_to_live_id.get(option["id"])
+            live_feature = wkc_feature_by_id.get(live_id) if live_id else None
+            if live_feature is not None:
+                entry["status"] = "configured" if live_feature["enabled"] else "not enabled"
+                entry["evidence"] = f"Live-verified against {live_feature['cr']}: {live_feature['evidence']}"
+            elif option["id"] == "lite_milvus" and milvus_status is not None and milvus_status.get("reachable"):
+                entry["status"] = "configured" if milvus_status["enabled"] else "not enabled"
+                entry["evidence"] = f"Live-verified against wxdengines.watsonxdata.ibm.com: {milvus_status['evidence']}"
             entries.append(entry)
 
         return {
@@ -1589,11 +1611,177 @@ class ClusterTelemetryCollector:
                         "https://www.ibm.com/docs/en/SSNFH6_5.1.x/hub/plan/node-planning.html"],
         }
 
+    def get_wkc_feature_status(self) -> Dict[str, Any]:
+        """Live-verifies specific WKC/IKC sub-features (Data Quality, Knowledge Graph,
+        standalone Data Lineage, Neo4j, Semantic Search) the way a live-cluster audit found
+        actually works: a sub-CRD instance existing is NOT sufficient evidence by itself — on
+        a real cluster a DataQuality CR existed and reported "Completed" while the owning
+        WKC CR's own enableDataQuality field was false and zero matching pods existed
+        anywhere, i.e. a reconciled-but-inactive shell. Cross-check the wkc-cr toggle field,
+        the sub-CRD's own instance count, AND real deployment/statefulset presence before
+        calling a feature enabled."""
+        wkc_json = self.run_cmd(["oc", "get", "wkc.wkc.cpd.ibm.com", "-n", self.namespace_cpd, "-o", "json"])
+        wkc_spec: Dict[str, Any] = {}
+        wkc_reachable = False
+        if wkc_json:
+            try:
+                items = json.loads(wkc_json).get("items", [])
+                if items:
+                    wkc_spec = items[0].get("spec", {})
+                    wkc_reachable = True
+            except Exception:
+                pass
+
+        def instance_count(resource: str) -> int:
+            out = self.run_cmd(["oc", "get", resource, "-n", self.namespace_cpd, "-o", "json"])
+            if not out:
+                return 0
+            try:
+                return len(json.loads(out).get("items", []))
+            except Exception:
+                return 0
+
+        workload_names = self.run_cmd(["oc", "get", "deploy,statefulset", "-n", self.namespace_cpd, "-o", "name"]) or ""
+        workload_names = workload_names.lower()
+
+        def has_workload(*substrings: str) -> bool:
+            return any(s.lower() in workload_names for s in substrings)
+
+        dq_instances = instance_count("dataquality.wkc.cpd.ibm.com")
+        kg_instances = instance_count("knowledgegraph.wkc.cpd.ibm.com")
+        lineage_instances = instance_count("datalineage.cpd.ibm.com")
+        neo4j_instances = instance_count("neo4jclusters.neo4j.cpd.ibm.com")
+        semsearch_instances = instance_count("semanticsearch.wkc.cpd.ibm.com")
+
+        enable_dq = wkc_spec.get("enableDataQuality")
+        enable_kg = wkc_spec.get("enableKnowledgeGraph")
+        dq_workload = has_workload("data-quality", "dataquality")
+        kg_workload = has_workload("wdp-kg-ingestion-service", "knowledge-accelerators")
+        lineage_workload = has_workload("lineage-scanner", "wdp-lineage", "wkc-data-lineage-service")
+
+        features = [
+            {
+                "id": "data_quality",
+                "name": "IBM Knowledge Catalog Data Quality",
+                "cr": "dataquality.wkc.cpd.ibm.com",
+                "instances": dq_instances,
+                "toggle_field": "wkc-cr spec.enableDataQuality",
+                "toggle_value": enable_dq,
+                "workload_found": dq_workload,
+                "enabled": bool(enable_dq) and dq_instances > 0 and dq_workload,
+                "evidence": (
+                    f"{dq_instances} CR instance(s), wkc-cr enableDataQuality={enable_dq}, dedicated workload found={dq_workload}. "
+                    + ("A CR can exist and report Completed while the feature is functionally off — verified on a live cluster where exactly this happened."
+                       if dq_instances > 0 and not (bool(enable_dq) and dq_workload) else "")
+                ),
+            },
+            {
+                "id": "knowledge_graph",
+                "name": "Knowledge Graph",
+                "cr": "knowledgegraph.wkc.cpd.ibm.com",
+                "instances": kg_instances,
+                "toggle_field": "wkc-cr spec.enableKnowledgeGraph",
+                "toggle_value": enable_kg,
+                "workload_found": kg_workload,
+                "enabled": bool(enable_kg) and kg_instances > 0 and kg_workload,
+                "evidence": f"{kg_instances} CR instance(s), wkc-cr enableKnowledgeGraph={enable_kg}, dedicated workload found={kg_workload} (e.g. wdp-kg-ingestion-service).",
+            },
+            {
+                "id": "data_lineage",
+                "name": "Data Lineage (standalone MANTA/DataLineage)",
+                "cr": "datalineage.cpd.ibm.com",
+                "instances": lineage_instances,
+                "toggle_field": None,
+                "toggle_value": None,
+                "workload_found": lineage_workload,
+                "enabled": lineage_instances > 0 and lineage_workload,
+                "evidence": f"{lineage_instances} CR instance(s), dedicated workload found={lineage_workload} (e.g. lineage-scanner-*, wdp-lineage). Not a wkc-cr toggle — this is a separate top-level add-on CR.",
+            },
+            {
+                "id": "neo4j",
+                "name": "Neo4j graph backend",
+                "cr": "neo4jclusters.neo4j.cpd.ibm.com",
+                "instances": neo4j_instances,
+                "toggle_field": None,
+                "toggle_value": None,
+                "workload_found": None,
+                "enabled": neo4j_instances > 0,
+                "evidence": f"{neo4j_instances} Neo4jCluster instance(s) (checked cluster-wide). The operator can be installed and idle with zero instances requested.",
+            },
+            {
+                "id": "semantic_search",
+                "name": "Semantic Search",
+                "cr": "semanticsearch.wkc.cpd.ibm.com",
+                "instances": semsearch_instances,
+                "toggle_field": None,
+                "toggle_value": None,
+                "workload_found": None,
+                "enabled": semsearch_instances > 0,
+                "evidence": f"{semsearch_instances} SemanticSearch CR instance(s). Do not confuse with the wkc-search deployment, which is Common Core Services' base catalog search (addOnId=ccs), not this feature.",
+            },
+        ]
+        return {"wkc_reachable": wkc_reachable, "features": features}
+
+    def get_live_milvus_status(self) -> Dict[str, Any]:
+        """watsonx.data's Milvus vector engine is a named WxdEngine instance, not its own
+        top-level CRD — so it can't be caught by the generic per-service CR discovery, and the
+        static install-options YAML (enable_lite_milvus) can just as easily be stale or never
+        set for a cluster where someone provisioned Milvus by other means. Read the actual
+        WxdEngine instance names on a live cluster where a real Milvus engine was found running
+        while install-options claimed it was disabled — this checks the ground truth directly."""
+        engines_json = self.run_cmd(["oc", "get", "wxdengines.watsonxdata.ibm.com", "-n", self.namespace_cpd, "-o", "json"])
+        milvus_names: List[str] = []
+        reachable = False
+        if engines_json:
+            try:
+                items = json.loads(engines_json).get("items", [])
+                reachable = True
+                milvus_names = [item["metadata"]["name"] for item in items if "milvus" in item.get("metadata", {}).get("name", "").lower()]
+            except Exception:
+                pass
+        workload_names = self.run_cmd(["oc", "get", "statefulset,deploy", "-n", self.namespace_cpd, "-o", "name"]) or ""
+        milvus_workload = any("milvus" in name.lower() for name in workload_names.splitlines())
+        enabled = bool(milvus_names) and milvus_workload
+        return {
+            "reachable": reachable,
+            "engine_names": milvus_names,
+            "workload_found": milvus_workload,
+            "enabled": enabled,
+            "evidence": (
+                f"{len(milvus_names)} WxdEngine instance(s) with 'milvus' in the name ({', '.join(milvus_names) or 'none'}), "
+                f"dedicated workload found={milvus_workload}."
+            ),
+        }
+
+    def get_cr_yaml(self, service_id: str, cr_name: Optional[str] = None) -> Dict[str, Any]:
+        """Fetches the real, live YAML for a service's Custom Resource on demand — not baked
+        into the telemetry poll payload (CRs can be large; most cards are never clicked)."""
+        defn = KNOWN_SERVICES_CATALOG.get(service_id) or self.custom_services.get(service_id)
+        if not defn:
+            return {"status": "error", "message": f"Unknown service id: {service_id}"}
+        resource = defn.get("cr_plural") or str(defn.get("cr_kind", "")).lower()
+        if not resource:
+            return {"status": "error", "message": f"No known CRD reference for '{service_id}'."}
+        args = ["oc", "get", resource]
+        if cr_name:
+            args.append(cr_name)
+        args += ["-n", self.namespace_cpd, "-o", "yaml"]
+        yaml_text = self.run_cmd(args)
+        if yaml_text is None:
+            return {
+                "status": "error",
+                "resource": resource,
+                "message": f"`oc get {resource}{' ' + cr_name if cr_name else ''} -n {self.namespace_cpd}` failed — check cluster connectivity, RBAC, and that an instance exists.",
+            }
+        return {"status": "ok", "resource": resource, "cr_name": cr_name, "namespace": self.namespace_cpd, "yaml": yaml_text}
+
     def get_cluster_overview(self) -> Dict[str, Any]:
         lic = self.get_license_service_data()
         services = self.get_service_telemetry()
         supported_services = self.get_supported_services(services)
-        install_options = self.get_install_options_overview()
+        wkc_features = self.get_wkc_feature_status()
+        milvus_status = self.get_live_milvus_status()
+        install_options = self.get_install_options_overview(wkc_features, milvus_status)
         dependency_explorer = self.get_dependency_explorer(services, install_options)
         compliance_controls = self.get_cluster_compliance_controls()
 
@@ -1615,6 +1803,7 @@ class ClusterTelemetryCollector:
             "install_options": install_options,
             "dependency_explorer": dependency_explorer,
             "compliance_controls": compliance_controls,
+            "wkc_features": wkc_features,
             "supported_services": supported_services,
             "services": services,
             "totals": {
@@ -2317,6 +2506,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     border-color: var(--cds-metering-accent);
     color: var(--cds-text-primary);
   }
+  .cds--graph-controls .cds--raw-link.is-active {
+    border-color: var(--cds-metering-accent);
+    color: var(--cds-metering-accent);
+    background: var(--cds-metering-accent-dim);
+  }
   .cds--neo-side {
     background: var(--cds-layer-01);
     padding: var(--cds-spacing-05);
@@ -2650,6 +2844,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     justify-content: space-between;
     cursor: pointer;
     transition: transform 0.18s cubic-bezier(0.2, 0, 0.38, 0.9), border-color 0.18s;
+    /* Every card gets the same height regardless of row/content — the two variable-length
+       text blocks below are line-clamped to a fixed number of lines so the shape is
+       predictable; the click-through drawer shows the untruncated text. */
+    height: 100%;
   }
   .cds--service-card:hover {
     border-color: var(--cds-border-strong-01);
@@ -2677,7 +2875,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     font-size: 12px;
     color: var(--cds-text-secondary);
     margin: 8px 0 10px 0;
-    min-height: 32px;
+    height: 32px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
   }
   .cds--license-terms-box {
     background-color: var(--cds-layer-02);
@@ -2687,11 +2889,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     color: var(--cds-text-secondary);
     margin-bottom: 12px;
     border-radius: 0 2px 2px 0;
+    height: 84px;
+    display: flex;
+    flex-direction: column;
   }
   .cds--license-terms-box strong {
     color: var(--cds-text-primary);
     display: block;
     margin-bottom: 2px;
+    flex: none;
+  }
+  .cds--license-terms-box .cds--clamp-text {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .cds--license-terms-box .cds--deps-line {
+    display: none;
   }
   .cds--meta-row {
     display: flex;
@@ -2758,6 +2973,38 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     white-space: pre-wrap;
     word-break: break-word;
   }
+  .cds--detail-section {
+    margin-bottom: var(--cds-spacing-05);
+  }
+  .cds--detail-section h4 {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--cds-text-helper);
+    margin-bottom: 6px;
+  }
+  .cds--detail-section-body {
+    font-size: 13px;
+    color: var(--cds-text-primary);
+    line-height: 1.55;
+  }
+  .cds--detail-kv {
+    display: grid;
+    grid-template-columns: minmax(120px, 160px) 1fr;
+    gap: 6px 12px;
+    font-size: 12px;
+  }
+  .cds--detail-kv dt { color: var(--cds-text-helper); }
+  .cds--detail-kv dd { color: var(--cds-text-primary); font-family: var(--cds-font-mono); }
+  .cds--yaml-viewer {
+    font-family: var(--cds-font-mono) !important;
+  }
+  .yaml-key { color: var(--cds-interactive-01); }
+  .yaml-string { color: var(--cds-support-success); }
+  .yaml-number { color: var(--cds-metering-accent); }
+  .yaml-bool { color: #be95ff; }
+  .yaml-comment { color: var(--cds-text-helper); font-style: italic; }
   .cds--form-item { margin-bottom: 14px; }
   .cds--form-grid {
     display: grid;
@@ -3027,6 +3274,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div class="cds--endpoint-grid" id="compliance-controls-grid" style="margin-bottom:var(--cds-spacing-07);"></div>
 
+    <!-- WKC/IKC sub-feature enablement: verified by CR toggle + real workload, not just CR presence -->
+    <div class="cds--section-header">
+      <h2 class="cds--section-title">Knowledge Catalog sub-features</h2>
+      <div style="font-size:12px; color:var(--cds-text-helper);">A sub-feature CR can exist and report "Completed" while functionally disabled — each verdict below cross-checks the parent toggle field and real running workloads, not CR presence alone</div>
+    </div>
+    <div class="cds--endpoint-grid" id="wkc-features-grid" style="margin-bottom:var(--cds-spacing-07);"></div>
+
     <!-- IBM License Service Registered Products -->
     <div class="cds--section-header">
       <h2 class="cds--section-title">IBM License Service &mdash; registered products</h2>
@@ -3134,27 +3388,23 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div class="cds--modal-backdrop" id="raw-modal">
   <div class="cds--modal cds--raw-modal">
     <h2 id="raw-modal-title">Raw evidence</h2>
-    <pre id="raw-modal-body">{}</pre>
+    <div id="raw-modal-body"></div>
     <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
-      <button class="cds--btn cds--btn--secondary" onclick="copyRawInspector()">Copy JSON</button>
+      <button class="cds--btn cds--btn--secondary" onclick="copyRawInspector()">Copy</button>
       <button class="cds--btn cds--btn--primary" onclick="closeRawInspector()">Close</button>
     </div>
   </div>
 </div>
 
-<script src="/vendor/cytoscape.min.js"></script>
-<script src="/vendor/elk.bundled.js"></script>
-<script src="/vendor/cytoscape-elk.js"></script>
-<script src="/vendor/cytoscape-expand-collapse.js"></script>
+<script src="/vendor/3d-force-graph.min.js"></script>
 <script>
 let currentScaleOverride = 'live';
 let rawData = null;
 let supportedServices = [];
-let rawInspectorItems = [];
+let rawInspectorStore = {};
+let rawInspectorNextId = 0;
 let dependencyExplorerState = { nodesById: {}, edges: [], selectedId: null };
-let dependencyCy = null;
-let dependencyExpandCollapseApi = null;
-let cytoscapeExtensionsRegistered = false;
+let dependencyGraph3D = null;
 let dependencyGraphSignature = '';
 let dependencyGraphHasBeenFocused = false;
 
@@ -3164,16 +3414,102 @@ function esc(value) {
   }[ch]));
 }
 
+// One reusable drawer/modal for everything that needs "click for more detail" — either a
+// quick raw-JSON dump (the original, simplest use) or a properly formatted panel (labeled
+// sections, tags, a live YAML view) with the raw JSON kept as a collapsed "Advanced" block
+// underneath rather than dropped. Which one renders is decided purely by which fields the
+// caller populates, so every existing addRawInspectorItem(title, payload) call site keeps
+// working unchanged.
+// Keyed by an ever-increasing id that is NEVER reused or reset, unlike an array index.
+// renderIfChanged() lets whole sections skip re-rendering when their data is unchanged, which
+// means their onclick="openRawInspector(N)" markup can sit in the DOM for many fetch cycles
+// after it was written — a plain "reset the array every render" scheme would silently repoint
+// those stale N's at whatever new item happens to land on that slot next.
 function addRawInspectorItem(title, payload) {
-  rawInspectorItems.push({ title, payload });
-  return rawInspectorItems.length - 1;
+  const id = rawInspectorNextId++;
+  rawInspectorStore[id] = { title, payload };
+  return id;
+}
+
+function addDetailItem(title, { tags = [], sectionsHtml = '', payload } = {}) {
+  const id = rawInspectorNextId++;
+  rawInspectorStore[id] = { title, tags, sectionsHtml, payload };
+  return id;
+}
+
+function detailSection(heading, bodyHtml) {
+  return `<div class="cds--detail-section"><h4>${esc(heading)}</h4><div class="cds--detail-section-body">${bodyHtml}</div></div>`;
+}
+
+// Small, dependency-free YAML highlighter — good enough to make a live CR readable at a
+// glance (keys, comments, list markers, quoted/numeric values each get a distinct color)
+// without vendoring a full syntax-highlighting library for one use.
+function highlightYaml(yamlText) {
+  return String(yamlText ?? '').split('\\n').map(rawLine => {
+    const line = esc(rawLine);
+    if (/^\\s*#/.test(line)) return `<span class="yaml-comment">${line}</span>`;
+    const m = line.match(/^(\\s*(?:-\\s+)?)([A-Za-z0-9_.\\/-]+)(:)(\\s*)(.*)$/);
+    if (m) {
+      const [, indent, key, colon, sp, rest] = m;
+      if (!rest) return `${indent}<span class="yaml-key">${key}</span>${colon}`;
+      const cls = /^(true|false|null)$/i.test(rest) ? 'yaml-bool' : isNaN(Number(rest)) ? 'yaml-string' : 'yaml-number';
+      return `${indent}<span class="yaml-key">${key}</span>${colon}${sp}<span class="${cls}">${rest}</span>`;
+    }
+    return line;
+  }).join('\\n');
+}
+
+let currentCrRequest = { serviceId: null, crName: null };
+
+async function viewCrYaml(serviceId, crName, displayName) {
+  const index = addDetailItem(`Live CR: ${displayName || serviceId}`, {
+    sectionsHtml: `<div class="cds--yaml-viewer"><span class="cds--spinner"></span> Fetching live YAML…</div>`,
+  });
+  openRawInspector(index);
+  currentCrRequest = { serviceId, crName };
+  try {
+    const url = `/api/cr/${encodeURIComponent(serviceId)}` + (crName ? `?name=${encodeURIComponent(crName)}` : '');
+    const res = await fetch(url);
+    const result = await res.json();
+    // Guard against a slower-earlier request resolving after a faster-later one.
+    if (currentCrRequest.serviceId !== serviceId || currentCrRequest.crName !== crName) return;
+    const item = rawInspectorStore[index];
+    if (result.status === 'ok') {
+      item.sectionsHtml = `
+        <div class="cds--method-row" style="margin-top:0;">
+          <span class="cds--tag cds--tag--blue">${esc(result.resource)}</span>
+          ${result.cr_name ? `<span class="cds--tag cds--tag--gray">${esc(result.cr_name)}</span>` : ''}
+          <span class="cds--tag cds--tag--gray">ns: ${esc(result.namespace)}</span>
+        </div>
+        <pre class="cds--yaml-viewer">${highlightYaml(result.yaml)}</pre>
+      `;
+    } else {
+      item.sectionsHtml = `<p style="color:var(--cds-support-danger); font-size:13px;">${esc(result.message || 'Could not fetch live CR YAML.')}</p>`;
+    }
+    if (document.getElementById('raw-modal').style.display === 'flex') openRawInspector(index);
+  } catch (e) {
+    const item = rawInspectorStore[index];
+    item.sectionsHtml = `<p style="color:var(--cds-support-danger); font-size:13px;">Fetch failed: ${esc(e.message)}</p>`;
+    if (document.getElementById('raw-modal').style.display === 'flex') openRawInspector(index);
+  }
 }
 
 function openRawInspector(index) {
-  const item = rawInspectorItems[index];
+  const item = rawInspectorStore[index];
   if (!item) return;
   document.getElementById('raw-modal-title').innerText = item.title || 'Raw evidence';
-  document.getElementById('raw-modal-body').innerText = JSON.stringify(item.payload ?? {}, null, 2);
+  const body = document.getElementById('raw-modal-body');
+  const tagsHtml = (item.tags || []).length
+    ? `<div class="cds--method-row" style="margin-top:0; margin-bottom:12px;">${item.tags.map(t => `<span class="cds--tag ${t.cls || 'cds--tag--gray'}">${esc(t.label)}</span>`).join('')}</div>`
+    : '';
+  if (item.sectionsHtml !== undefined) {
+    const rawJson = item.payload !== undefined
+      ? `<details class="cds--finance-details" style="margin-top:14px;"><summary>Advanced: raw JSON</summary><pre>${esc(JSON.stringify(item.payload, null, 2))}</pre></details>`
+      : '';
+    body.innerHTML = tagsHtml + item.sectionsHtml + rawJson;
+  } else {
+    body.innerHTML = `<pre>${esc(JSON.stringify(item.payload ?? {}, null, 2))}</pre>`;
+  }
   document.getElementById('raw-modal').style.display = 'flex';
 }
 
@@ -3271,35 +3607,6 @@ function resolveCssColor(value) {
   return getComputedStyle(document.documentElement).getPropertyValue(match[1]).trim() || value;
 }
 
-// Parses any valid CSS color (hex, rgb(), named) into [r,g,b] by letting the browser's own
-// color engine do it, rather than hand-rolling a hex-only parser that would silently fail on
-// the rgb(...) strings getComputedStyle returns for resolved CSS variables.
-const _colorParseEl = typeof document !== 'undefined' ? document.createElement('div') : null;
-function parseColorToRgb(color) {
-  if (!_colorParseEl) return [128, 128, 128];
-  _colorParseEl.style.color = color;
-  document.body.appendChild(_colorParseEl);
-  const rgb = getComputedStyle(_colorParseEl).color;
-  document.body.removeChild(_colorParseEl);
-  const nums = rgb.match(/[\\d.]+/g);
-  return nums ? nums.slice(0, 3).map(Number) : [128, 128, 128];
-}
-
-function lightenColor(color, amount) {
-  const [r, g, b] = parseColorToRgb(color);
-  const lift = c => Math.min(255, Math.round(c + (255 - c) * amount));
-  // No spaces after the commas: cytoscape's background-gradient-stop-colors splits its
-  // value on whitespace to get the color list, so "rgb(1, 2, 3) rgb(4, 5, 6)" (the normal,
-  // human-readable rgb() format) gets shredded into five bogus tokens instead of two colors.
-  return `rgb(${lift(r)},${lift(g)},${lift(b)})`;
-}
-
-// Same whitespace-splitting hazard applies to any already-rgb() color reused inside a
-// gradient-stop-colors list (e.g. a value that came from getComputedStyle()).
-function compactRgb(color) {
-  return String(color).replace(/,\\s+/g, ',');
-}
-
 function collectDependencyLineage(selectedId) {
   const edges = dependencyExplorerState.edges || [];
   const nodesById = dependencyExplorerState.nodesById || {};
@@ -3367,207 +3674,89 @@ function collectDependencyLineage(selectedId) {
   return { nodeIds, edgeIndexes };
 }
 
-function highlightDependencyGraph(selectedId, selectedEdgeIndex = null) {
-  if (!dependencyCy) return;
-  const lineage = collectDependencyLineage(selectedId);
-  dependencyCy.batch(() => {
-    dependencyCy.elements().removeClass('is-dim is-lineage is-focus is-selected-edge');
-    dependencyCy.elements().addClass('is-dim');
-    dependencyCy.nodes().filter(ele => lineage.nodeIds.has(ele.id())).removeClass('is-dim').addClass('is-lineage');
-    dependencyCy.edges().filter(ele => lineage.edgeIndexes.has(ele.data('edgeIndex'))).removeClass('is-dim').addClass('is-lineage');
-    dependencyCy.$id(selectedId).removeClass('is-dim').addClass('is-focus');
-    if (selectedEdgeIndex !== null) {
-      dependencyCy.edges().filter(ele => ele.data('edgeIndex') === selectedEdgeIndex).removeClass('is-dim').addClass('is-selected-edge');
-    }
-  });
-  const visible = dependencyCy.elements('.is-lineage, .is-focus, .is-selected-edge');
-  dependencyCy.animate({
-    fit: { eles: visible.length ? visible : dependencyCy.elements(), padding: 42 },
-    duration: 360,
-    easing: 'ease-out-cubic'
-  });
-}
-
-function runDependencyLayout() {
-  if (!dependencyCy) return;
-  const useElk = typeof cytoscapeElk !== 'undefined';
-
-  // Temporarily hide platform-dep/foundation edges during layout so they don't get used for
-  // rank assignment (a hub node with dozens of "everyone depends on the platform" edges can
-  // still distort layered placement) — restored once the layout settles.
-  const platformEdges = dependencyCy.edges('.edge-platform');
-  platformEdges.style('display', 'none');
-
-  dependencyCy.one('layoutstop', () => {
-    platformEdges.style('display', 'element');
-    revealDependencyGraph();
-    startEdgeFlowAnimation();
-    // The very first render defaults selectedId to a prominent node (e.g. watsonx_data) so
-    // the detail panel has something to show — but showDependencyNode's lineage highlighting
-    // dims and zooms to JUST that node's subgraph, which on first load made unrelated nodes
-    // (e.g. a standalone WKC/DataStage branch) sit outside the fitted viewport, looking like
-    // they'd failed to render. Show the whole graph un-dimmed first; a click narrows it.
-    if (dependencyExplorerState.selectedId && dependencyGraphHasBeenFocused) {
-      showDependencyNode(dependencyExplorerState.selectedId);
-    } else {
-      fitDependencyGraph();
-    }
-  });
-
-  if (useElk) {
-    // ELK's layered algorithm (Sugiyama phases + configurable crossing-minimization +
-    // network-simplex node placement) replaces dagre here — it is purpose-built for exactly
-    // this hub-heavy DAG shape (one platform root fanning into 25-40 leaf products) and needs
-    // far less hand-tuning than the taxi-routing/spacing hacks the dagre layout required.
-    dependencyCy.layout({
-      name: 'elk',
-      fit: true,
-      padding: 72,
-      animate: true,
-      animationDuration: 480,
-      animationEasing: 'ease-out-cubic',
-      elk: {
-        algorithm: 'layered',
-        'elk.direction': 'DOWN',
-        'elk.layered.crossingMinimization.strategy': 'LAYER_SWEEP',
-        'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
-        'elk.layered.spacing.nodeNodeBetweenLayers': 70,
-        'elk.spacing.nodeNode': 45,
-        'elk.layered.spacing.edgeNodeBetweenLayers': 30,
-        'elk.edgeRouting': 'ORTHOGONAL',
-        'elk.layered.cycleBreaking.strategy': 'GREEDY'
-      }
-    }).run();
-  } else {
-    dependencyCy.layout({
-      name: 'breadthfirst',
-      directed: true,
-      roots: dependencyCy.filter('node[id = "software_hub"]'),
-      spacingFactor: 2.2,
-      animate: true,
-      animationDuration: 480,
-      fit: true,
-      padding: 72
-    }).run();
-  }
-}
-
-function resizeDependencyGraph() {
-  if (!dependencyCy) return;
-  dependencyCy.resize();
-  fitDependencyGraph();
-}
-
-function fitDependencyGraph() {
-  if (!dependencyCy) return;
-  dependencyCy.animate({
-    fit: { eles: dependencyCy.elements(), padding: 42 },
-    duration: 320,
-    easing: 'ease-out-cubic'
-  });
-}
-
-function zoomDependencyGraph(factor) {
-  if (!dependencyCy) return;
-  const level = Math.max(dependencyCy.minZoom(), Math.min(dependencyCy.maxZoom(), dependencyCy.zoom() * factor));
-  dependencyCy.animate({ zoom: { level, renderedPosition: { x: dependencyCy.width() / 2, y: dependencyCy.height() / 2 } }, duration: 180, easing: 'ease-out-cubic' });
-}
-
-function updateDependencyZoomReadout() {
-  const el = document.getElementById('dependency-zoom-readout');
-  if (el && dependencyCy) el.textContent = Math.round(dependencyCy.zoom() * 100) + '%';
-}
-
-const prefersReducedMotion = () => typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-// Reveals the graph once ELK has settled on final positions (see the opacity:0 set right
-// after cytoscape() is constructed in initDependencyCytoscape) — a top-to-bottom stagger so
-// the tree appears to build itself, rather than a jumbled layout snapping into place.
-// Uses .animate()+removeStyle rather than a permanent .style() call so the opacity set here
-// doesn't outlive the animation and fight the .is-dim/.is-lineage class-driven opacity that
-// highlightDependencyGraph applies right after (an explicit per-element style in Cytoscape.js
-// otherwise persists over class-based styles).
-function revealDependencyGraph() {
-  const container = document.getElementById('dependency-graph-cy');
-  if (container) container.classList.add('is-ready');
-  if (!dependencyCy) return;
-  if (prefersReducedMotion()) {
-    dependencyCy.elements().removeStyle('opacity');
-    updateDependencyZoomReadout();
-    return;
-  }
-  const nodes = dependencyCy.nodes().sort((a, b) => a.position('y') - b.position('y'));
-  nodes.forEach((node, i) => {
-    node.animate(
-      { style: { opacity: 1 } },
-      { duration: 280, delay: i * 55, easing: 'ease-out-cubic', complete: () => node.removeStyle('opacity') }
-    );
-  });
-  const edgeDelay = nodes.length * 55;
-  dependencyCy.edges().forEach((edge, i) => {
-    edge.animate(
-      { style: { opacity: 1 } },
-      { duration: 320, delay: edgeDelay + i * 18, easing: 'ease-out-cubic', complete: () => edge.removeStyle('opacity') }
-    );
-  });
-  updateDependencyZoomReadout();
-}
-
-// The one place this dashboard's actual subject — licensed capacity being measured — gets a
-// literal visual: a slow marching-dash flow along "measured_by" edges, toward IBM License
-// Service. Deliberately the only continuously-animated element on the page.
-let dependencyFlowRafId = null;
-function startEdgeFlowAnimation() {
-  stopEdgeFlowAnimation();
-  if (!dependencyCy || prefersReducedMotion()) return;
-  const flowEdges = dependencyCy.edges('.edge-metering');
-  if (!flowEdges.length) return;
-  let offset = 0;
-  const step = () => {
-    offset = (offset - 0.6 + 1000) % 1000;
-    flowEdges.style('line-dash-offset', offset);
-    dependencyFlowRafId = requestAnimationFrame(step);
-  };
-  dependencyFlowRafId = requestAnimationFrame(step);
-}
-function stopEdgeFlowAnimation() {
-  if (dependencyFlowRafId) cancelAnimationFrame(dependencyFlowRafId);
-  dependencyFlowRafId = null;
-}
-
-// Single source of truth for node shape/color/label so the on-canvas rendering and the
-// legend can never drift apart (the previous hand-authored legend HTML documented 4
-// shapes/colors against 6/7 actually in use). Order matters: first match wins, most
-// specific checks first — mirrors the original nodeShape/nodeColor precedence exactly.
+// Single source of truth for node color/label so the on-canvas rendering, the legend, and
+// buildForceGraphData's sphere colors can never drift apart. Order matters: first match
+// wins, most specific checks first.
 const DEPENDENCY_NODE_STYLES = [
-  { match: t => t === 'metering',                              shape: 'barrel',         label: 'License metering',                    color: () => resolveCssColor('var(--cds-support-success)') },
-  { match: t => t === 'platform',                               shape: 'barrel',         label: 'Platform root',                       color: () => resolveCssColor('var(--cds-layer-02)') },
-  { match: t => t === 'platform_dependency',                    shape: 'round-rectangle',label: 'Platform dependency',                 color: () => resolveCssColor('var(--cds-layer-02)') },
-  { match: t => t === 'core_product',                           shape: 'round-rectangle',label: 'Core product',                        color: () => resolveCssColor('var(--cds-interactive-01)') },
-  { match: t => t.includes('premium'),                          shape: 'diamond',        label: 'Premium reference',                   color: () => '#7c3aed' },
-  { match: t => t.includes('integration_component'),            shape: 'hexagon',        label: 'Integration component (bundled RU)',  color: () => '#0e7490' },
-  { match: t => t.includes('add_on') || t.includes('add-on'),   shape: 'ellipse',        label: 'Add-on',                               color: () => '#0891b2' },
-  { match: t => t.includes('option'),                           shape: 'cut-rectangle',  label: 'Install option',                      color: () => '#6366f1' },
-  { match: t => t.includes('dependency'),                       shape: 'round-rectangle',label: 'Dependency',                          color: () => resolveCssColor('var(--cds-support-info)') },
+  { match: t => t === 'metering',                              label: 'License metering',                    color: () => resolveCssColor('var(--cds-support-success)') },
+  { match: t => t === 'platform',                               label: 'Platform root',                       color: () => resolveCssColor('var(--cds-layer-02)') },
+  { match: t => t === 'platform_dependency',                    label: 'Platform dependency',                 color: () => resolveCssColor('var(--cds-layer-02)') },
+  { match: t => t === 'core_product',                           label: 'Core product',                        color: () => resolveCssColor('var(--cds-interactive-01)') },
+  { match: t => t.includes('premium'),                          label: 'Premium reference',                   color: () => '#7c3aed' },
+  { match: t => t.includes('integration_component'),            label: 'Integration component (bundled RU)',  color: () => '#0e7490' },
+  { match: t => t.includes('add_on') || t.includes('add-on'),   label: 'Add-on',                               color: () => '#0891b2' },
+  { match: t => t.includes('option'),                           label: 'Install option',                      color: () => '#6366f1' },
+  { match: t => t.includes('dependency'),                       label: 'Dependency',                          color: () => resolveCssColor('var(--cds-support-info)') },
 ];
-const DEPENDENCY_NODE_STYLE_DEFAULT = { shape: 'round-rectangle', label: 'Other', color: () => resolveCssColor('var(--cds-support-info)') };
+const DEPENDENCY_NODE_STYLE_DEFAULT = { label: 'Other', color: () => resolveCssColor('var(--cds-support-info)') };
 
 function dependencyNodeStyle(node) {
   const t = String(node?.type || '');
   return DEPENDENCY_NODE_STYLES.find(s => s.match(t)) || DEPENDENCY_NODE_STYLE_DEFAULT;
 }
-function nodeShape(node) { return dependencyNodeStyle(node).shape; }
 
-// Crude CSS approximation of each cytoscape shape, good enough for a small legend swatch.
-function shapeSwatchStyle(shape) {
-  switch (shape) {
-    case 'barrel': return 'border-radius:40%;';
-    case 'diamond': return 'transform:rotate(45deg); border-radius:1px;';
-    case 'hexagon': return 'clip-path:polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%);';
-    case 'ellipse': return 'border-radius:50%;';
-    case 'cut-rectangle': return 'clip-path:polygon(15% 0,100% 0,100% 85%,85% 100%,0 100%,0 15%);';
-    default: return 'border-radius:3px;';
-  }
+// The graph that replaced Cytoscape+ELK's strict top-down layered diagram: a WebGL 3D force
+// simulation (3d-force-graph, Three.js bundled in — see app/vendor/3d-force-graph.min.js).
+// Nodes are draggable spheres that spring back under the physics simulation ("free to slip"),
+// the camera orbits with mouse drag / scroll-to-zoom out of the box, and animated particles
+// flow along "measured_by"/"bundled_as_ru" edges via the library's own linkDirectionalParticles
+// — no hand-rolled dash-offset animation loop needed this time.
+function highlightDependencyGraph(selectedId, selectedEdgeIndex = null) {
+  if (!dependencyGraph3D) return;
+  const lineage = collectDependencyLineage(selectedId);
+  const { nodes, links } = dependencyGraph3D.graphData();
+  nodes.forEach(n => { n.__focused = n.id === selectedId; n.__dimmed = !lineage.nodeIds.has(n.id); });
+  links.forEach(l => {
+    l.__dimmed = !lineage.edgeIndexes.has(l.edgeIndex);
+    l.__selected = selectedEdgeIndex !== null && l.edgeIndex === selectedEdgeIndex;
+  });
+  dependencyGraph3D.refresh();
+  dependencyGraph3D.zoomToFit(500, 90, n => lineage.nodeIds.has(n.id));
+}
+
+function reheatDependencyGraph() {
+  if (dependencyGraph3D) dependencyGraph3D.d3ReheatSimulation();
+}
+
+function resizeDependencyGraph() {
+  if (!dependencyGraph3D) return;
+  const container = document.getElementById('dependency-graph-cy');
+  if (!container) return;
+  dependencyGraph3D.width(container.clientWidth).height(container.clientHeight);
+}
+
+function fitDependencyGraph() {
+  if (dependencyGraph3D) dependencyGraph3D.zoomToFit(400, 70);
+}
+
+function zoomDependencyGraph(factor) {
+  if (!dependencyGraph3D) return;
+  const pos = dependencyGraph3D.cameraPosition();
+  dependencyGraph3D.cameraPosition({ x: pos.x * factor, y: pos.y * factor, z: pos.z * factor }, undefined, 260);
+}
+
+const prefersReducedMotion = () => typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+let dependencyAutoRotate = false;
+let dependencyRotateRafId = null;
+function toggleDependencyRotate() {
+  dependencyAutoRotate = !dependencyAutoRotate;
+  if (dependencyAutoRotate) startDependencyRotate();
+  else if (dependencyRotateRafId) cancelAnimationFrame(dependencyRotateRafId);
+  const btn = document.getElementById('dependency-rotate-btn');
+  if (btn) btn.classList.toggle('is-active', dependencyAutoRotate);
+}
+function startDependencyRotate() {
+  if (!dependencyGraph3D || prefersReducedMotion()) return;
+  let angle = 0;
+  const step = () => {
+    if (!dependencyAutoRotate) return;
+    angle += 0.0022;
+    const distance = 340;
+    dependencyGraph3D.cameraPosition({ x: distance * Math.sin(angle), z: distance * Math.cos(angle) });
+    dependencyRotateRafId = requestAnimationFrame(step);
+  };
+  dependencyRotateRafId = requestAnimationFrame(step);
 }
 
 // Same single-source-of-truth principle for edges: class drives the CSS (color + dash
@@ -3589,11 +3778,10 @@ function dependencyEdgeStyle(relationship) {
   const r = String(relationship || '');
   return DEPENDENCY_EDGE_STYLES.find(s => s.match(r)) || DEPENDENCY_EDGE_STYLE_DEFAULT;
 }
-function edgeClass(relationship) { return dependencyEdgeStyle(relationship).cls; }
 
 function renderDependencyLegend() {
   const nodeRows = DEPENDENCY_NODE_STYLES.map(s => `
-    <span><span class="cds--legend-dot" style="background:${s.color()}; ${shapeSwatchStyle(s.shape)}"></span>${esc(s.label)}</span>
+    <span><span class="cds--legend-dot" style="background:${s.color()};"></span>${esc(s.label)}</span>
   `).join('');
   const edgeRows = [...DEPENDENCY_EDGE_STYLES, DEPENDENCY_EDGE_STYLE_DEFAULT].map(s => `
     <span><span style="display:inline-block;width:22px;height:0;border-top:2px ${s.dash} ${s.swatchColor};margin-right:6px;vertical-align:middle;"></span>${esc(s.label)}</span>
@@ -3601,373 +3789,125 @@ function renderDependencyLegend() {
   return `
     <strong style="font-size:11px; color:var(--cds-text-secondary); text-transform:uppercase; letter-spacing:0.5px;">Node types</strong>
     ${nodeRows}
-    <strong style="font-size:11px; color:var(--cds-text-secondary); text-transform:uppercase; letter-spacing:0.5px; margin-top:6px;">Relationship types</strong>
+    <strong style="font-size:11px; color:var(--cds-text-secondary); text-transform:uppercase; letter-spacing:0.5px; margin-top:6px; display:block;">Relationship types</strong>
     ${edgeRows}
-    <strong style="font-size:11px; color:var(--cds-text-secondary); text-transform:uppercase; letter-spacing:0.5px; margin-top:6px;">Border &amp; grouping</strong>
-    <span><span class="cds--legend-dot" style="background:transparent; border:3px solid var(--cds-support-success);"></span>Thick green border = confirmed via live CR / License Service</span>
-    <span><span class="cds--legend-dot" style="background:transparent; border:2px dashed var(--cds-border-strong-01);"></span>Dashed box = collapsible bundle (click the +/- cue, or use Collapse bundles)</span>
+    <strong style="font-size:11px; color:var(--cds-text-secondary); text-transform:uppercase; letter-spacing:0.5px; margin-top:6px; display:block;">Node size</strong>
+    <span><span class="cds--legend-dot" style="background:var(--cds-text-helper); width:14px; height:14px;"></span>Platform / metering (larger sphere)</span>
+    <span><span class="cds--legend-dot" style="background:var(--cds-text-helper); width:8px; height:8px;"></span>Product / dependency (smaller sphere)</span>
   `;
 }
 
+let dependencyBundlesHidden = false;
 function collapseDependencyBundles() {
-  if (dependencyExpandCollapseApi) dependencyExpandCollapseApi.collapseAll();
+  dependencyBundlesHidden = true;
+  rebuildDependencyGraphData();
 }
-
 function expandDependencyGraph() {
-  if (dependencyExpandCollapseApi) dependencyExpandCollapseApi.expandAll();
-  else runDependencyLayout();
+  dependencyBundlesHidden = false;
+  rebuildDependencyGraphData();
 }
 
-function initDependencyCytoscape(nodeMap, graphEdges) {
-  const container = document.getElementById('dependency-graph-cy');
-  if (!container || typeof cytoscape === 'undefined') return;
-  if (!cytoscapeExtensionsRegistered) {
-    if (typeof cytoscapeElk !== 'undefined') cytoscape.use(cytoscapeElk);
-    if (typeof cytoscapeExpandCollapse !== 'undefined') cytoscape.use(cytoscapeExpandCollapse);
-    cytoscapeExtensionsRegistered = true;
-  }
-  if (dependencyCy) {
-    stopEdgeFlowAnimation();
-    dependencyCy.destroy();
-    dependencyCy = null;
-    dependencyExpandCollapseApi = null;
-  }
-
-  const installedBorder = resolveCssColor('var(--cds-support-success)');
-  const defaultBorder = resolveCssColor('var(--cds-border-strong-01)');
-  const metering = resolveCssColor('var(--cds-metering-accent)');
-
-  // Nodes bundled into an edition as RU ("bundled_as_ru") become children of a compound
-  // parent node for that edition, so the fan-out can be collapsed to one node on demand via
-  // cytoscape-expand-collapse instead of always showing every bundled component. A compound
-  // parent's rendered size is automatically inferred from its children by Cytoscape.js
-  // regardless of the fixed leaf width/height set below, so this is safe to combine with them.
-  const parentOf = {};
-  graphEdges.forEach(edge => {
-    if (edge.relationship === 'bundled_as_ru' && nodeMap[edge.from] && nodeMap[edge.to] && !parentOf[edge.to]) {
-      parentOf[edge.to] = edge.from;
-    }
-  });
-
-  const elements = [
-    ...Object.values(nodeMap).map(node => {
-      const status = node.option_status || (node.installed ? 'installed' : dependencyTypeLabel(node.type));
-      const bgColor = dependencyNodeStyle(node).color();
-      const isPlatform = node.type === 'platform' || node.type === 'platform_dependency' || node.type === 'metering';
-      const textColor = isPlatform ? resolveCssColor('var(--cds-text-primary)') : '#ffffff';
+function buildForceGraphData(nodeMap, graphEdges) {
+  const bundledChildIds = new Set(graphEdges.filter(e => e.relationship === 'bundled_as_ru').map(e => e.to));
+  const nodes = Object.values(nodeMap)
+    .filter(n => !(dependencyBundlesHidden && bundledChildIds.has(n.id)))
+    .map(n => {
+      const isHub = n.type === 'platform' || n.type === 'platform_dependency' || n.type === 'metering';
       return {
-        data: {
-          id: node.id,
-          label: node.label,
-          status,
-          type: dependencyTypeLabel(node.type),
-          bgColor,
-          // cytoscape's background-gradient-stop-colors takes ONE data() reference whose
-          // value is the full space-separated color list — not multiple data() calls — and
-          // splits on ANY whitespace, so every color in the list must itself be space-free.
-          gradientStops: `${lightenColor(bgColor, 0.4)} ${compactRgb(bgColor)}`,
-          textColor,
-          borderColor: node.installed ? installedBorder : defaultBorder,
-          shape: nodeShape(node),
-          ...(parentOf[node.id] ? { parent: parentOf[node.id] } : {}),
-        },
-        classes: [
-          node.installed ? 'is-installed' : '',
-          `node-type-${(node.type || '').replace(/[^a-z_]/g, '_')}`,
-        ].filter(Boolean).join(' ')
+        id: n.id,
+        name: n.label,
+        type: n.type,
+        installed: n.installed,
+        val: isHub ? 11 : 5.5,
+        baseColor: dependencyNodeStyle(n).color(),
       };
-    }),
-    ...graphEdges.map(edge => ({
-      data: {
-        id: `edge-${edge.edgeIndex}`,
-        source: edge.from,
-        target: edge.to,
-        label: dependencyTypeLabel(edge.relationship),
-        relationship: edge.relationship,
-        edgeIndex: edge.edgeIndex
-      },
-      classes: edgeClass(edge.relationship)
-    }))
-  ];
-
-  const edgeBase = {
-    'curve-style': 'taxi',        // orthogonal routing — lines go straight then turn 90°, never cross nodes
-    'taxi-direction': 'downward', // TB layout: prefer downward routing
-    'taxi-turn': 30,              // px before first turn
-    'target-arrow-shape': 'triangle',
-    'target-arrow-color': resolveCssColor('var(--cds-border-strong-01)'),
-    'line-color': resolveCssColor('var(--cds-border-strong-01)'),
-    'width': 1.5,
-    'opacity': 0.72,
-    'label': '',                  // no labels on edges by default — reduces clutter
-    'font-size': 7,
-    'font-family': 'IBM Plex Sans, Arial, sans-serif',
-    'color': resolveCssColor('var(--cds-text-helper)'),
-    'text-background-color': resolveCssColor('var(--cds-background)'),
-    'text-background-opacity': 0.9,
-    'text-background-padding': 2,
-    'arrow-scale': 0.85,
-    'transition-property': 'line-color, target-arrow-color, opacity, width',
-    'transition-duration': 180
-  };
-
-  dependencyCy = cytoscape({
-    container,
-    elements,
-    minZoom: 0.3,
-    maxZoom: 2.5,
-    style: [
-      // ── Base node ──────────────────────────────────────────────
-      {
-        selector: 'node',
-        style: {
-          'shape': 'data(shape)',
-          'background-fill': 'linear-gradient',
-          'background-gradient-stop-colors': 'data(gradientStops)',
-          'background-gradient-direction': 'to-bottom-right',
-          'border-width': 2,
-          'border-color': 'data(borderColor)',
-          'width': 160,           // wide enough for longest label without wrapping
-          'height': 52,
-          'padding': '10px',
-          'label': 'data(label)',
-          'text-wrap': 'wrap',
-          'text-max-width': 140,  // matches width - padding
-          'text-valign': 'center',
-          'text-halign': 'center',
-          'color': 'data(textColor)',
-          'font-family': 'IBM Plex Sans, Arial, sans-serif',
-          'font-size': 10,
-          'font-weight': 600,
-          'overlay-opacity': 0,
-          'overlay-padding': 10,
-          'transition-property': 'border-width, border-color, opacity, overlay-opacity, width, height',
-          'transition-duration': 180,
-          'transition-timing-function': 'ease-out'
-        }
-      },
-      // Platform / metering — wider pill
-      {
-        selector: '.node-type-platform, .node-type-platform_dependency, .node-type-metering',
-        style: { 'width': 180, 'height': 46, 'font-size': 9, 'font-weight': 400, 'border-width': 1, 'text-max-width': 160 }
-      },
-      // Premium — diamond needs more room
-      {
-        selector: '.node-type-premium_reference',
-        style: { 'width': 170, 'height': 70, 'text-max-width': 130 }
-      },
-      // Integration bundle — hexagon, compact
-      {
-        selector: '.node-type-integration_component',
-        style: { 'width': 144, 'height': 50, 'font-size': 9, 'text-max-width': 124 }
-      },
-      // Installed — thicker green border
-      {
-        selector: '.is-installed',
-        style: { 'border-width': 3 }
-      },
-      // Focus node — pop out with a glow ring in the signature metering color. Cytoscape has
-      // no box-shadow equivalent; overlay-* (a soft tinted halo drawn behind the node) is the
-      // real supported mechanism for this.
-      {
-        selector: 'node.is-focus',
-        style: {
-          'border-width': 5, 'border-color': '#ffffff', 'width': 176, 'height': 60, 'font-size': 11,
-          'overlay-color': metering, 'overlay-opacity': 0.35, 'overlay-padding': 14
-        }
-      },
-
-      // ── Base edge ──────────────────────────────────────────────
-      { selector: 'edge', style: { ...edgeBase } },
-
-      // Bundled-as-RU — thick teal solid + label badge
-      {
-        selector: 'edge.edge-bundled',
-        style: {
-          'line-color': '#0e7490',
-          'target-arrow-color': '#0e7490',
-          'width': 2.8,
-          'opacity': 0.95,
-          'line-style': 'solid',
-          'color': '#0e7490',
-        }
-      },
-      // Platform / foundation — dotted, muted
-      {
-        selector: 'edge.edge-platform',
-        style: {
-          'line-style': 'dotted',
-          'line-color': resolveCssColor('var(--cds-border-subtle-01)'),
-          'target-arrow-color': resolveCssColor('var(--cds-border-subtle-01)'),
-          'width': 1,
-          'opacity': 0.5,
-          'label': '',  // no label on platform deps — reduces clutter
-        }
-      },
-      // Optional / install-option — long-dashed blue
-      {
-        selector: 'edge.edge-optional',
-        style: {
-          'line-style': 'dashed',
-          'line-dash-pattern': [8, 4],
-          'line-color': '#6366f1',
-          'target-arrow-color': '#6366f1',
-          'target-arrow-shape': 'triangle-backcurve',
-          'width': 1.6,
-          'opacity': 0.82,
-        }
-      },
-      // Restricted dependency — dashed red
-      {
-        selector: 'edge.edge-restricted',
-        style: {
-          'line-style': 'dashed',
-          'line-dash-pattern': [5, 3],
-          'line-color': resolveCssColor('var(--cds-support-danger)'),
-          'target-arrow-color': resolveCssColor('var(--cds-support-danger)'),
-          'width': 2,
-          'opacity': 0.9,
-          'color': resolveCssColor('var(--cds-support-danger)'),
-        }
-      },
-      // Premium reference — dashed purple
-      {
-        selector: 'edge.edge-premium',
-        style: {
-          'line-style': 'dashed',
-          'line-dash-pattern': [6, 3],
-          'line-color': '#7c3aed',
-          'target-arrow-color': '#7c3aed',
-          'width': 2,
-          'opacity': 0.88,
-          'color': '#7c3aed',
-        }
-      },
-      // Edition uplift — double-line effect via thick + colored
-      {
-        selector: 'edge.edge-edition',
-        style: {
-          'line-color': resolveCssColor('var(--cds-interactive-01)'),
-          'target-arrow-color': resolveCssColor('var(--cds-interactive-01)'),
-          'width': 2.4,
-          'opacity': 0.9,
-          'target-arrow-shape': 'triangle',
-        }
-      },
-      // Metering edge (measured_by)
-      {
-        selector: 'edge.edge-metering',
-        style: {
-          'line-color': resolveCssColor('var(--cds-support-success)'),
-          'target-arrow-color': resolveCssColor('var(--cds-support-success)'),
-          'line-style': 'dashed',
-          'line-dash-pattern': [10, 4],
-          'width': 1.8,
-          'opacity': 0.75,
-        }
-      },
-
-      // ── Interaction states ──────────────────────────────────────
-      { selector: '.is-dim', style: { 'opacity': 0.12 } },
-      {
-        selector: 'node.is-lineage',
-        style: { 'opacity': 1, 'border-width': 4, 'border-color': resolveCssColor('var(--cds-interactive-01)') }
-      },
-      {
-        selector: 'edge.is-lineage',
-        style: { 'opacity': 1, 'width': 3.5,
-          'line-color': resolveCssColor('var(--cds-support-success)'),
-          'target-arrow-color': resolveCssColor('var(--cds-support-success)') }
-      },
-      {
-        selector: 'edge.is-selected-edge',
-        style: { 'width': 4.5,
-          'line-color': resolveCssColor('var(--cds-interactive-01)'),
-          'target-arrow-color': resolveCssColor('var(--cds-interactive-01)') }
-      },
-      {
-        selector: 'node:active',
-        style: { 'overlay-opacity': 0.08, 'overlay-color': '#ffffff' }
-      },
-      // Hover feedback — previously the is-hover class was toggled with no matching style
-      // rule anywhere, so hovering a node/edge gave zero visual affordance that it was
-      // clickable.
-      {
-        selector: 'node.is-hover',
-        style: {
-          'border-width': 4, 'overlay-opacity': 0.16, 'overlay-color': metering, 'overlay-padding': 8
-        }
-      },
-      {
-        selector: 'edge.is-hover',
-        style: { 'width': 3.2, 'opacity': 1 }
-      },
-      // Compound parent (a bundling product with collapsible bundled-as-RU children) —
-      // dashed container box, label pinned to the top so it doesn't collide with children.
-      {
-        selector: '$node > node',
-        style: {
-          'shape': 'round-rectangle',
-          'background-opacity': 0.12,
-          'border-width': 2,
-          'border-style': 'dashed',
-          'border-color': resolveCssColor('var(--cds-border-strong-01)'),
-          'label': 'data(label)',
-          'text-valign': 'top',
-          'text-halign': 'center',
-          'text-margin-y': -6,
-          'font-size': 10,
-          'font-weight': 600,
-          'padding': '28px',
-        }
-      },
-      {
-        selector: 'node.cy-expand-collapse-collapsed-node',
-        style: { 'border-style': 'double', 'border-width': 7 }
-      }
-    ]
-  });
-
-  dependencyCy.on('tap', 'node', event => { dependencyGraphHasBeenFocused = true; showDependencyNode(event.target.id()); });
-  dependencyCy.on('tap', 'edge', event => { dependencyGraphHasBeenFocused = true; showDependencyEdge(event.target.data('edgeIndex')); });
-  dependencyCy.on('mouseover', 'node, edge', event => event.target.addClass('is-hover'));
-  dependencyCy.on('mouseout', 'node, edge', event => event.target.removeClass('is-hover'));
-  dependencyCy.on('zoom pan', updateDependencyZoomReadout);
-
-  // Hide everything the instant it's created — ELK's layout (below) computes final positions
-  // headlessly while hidden, so the reveal in runDependencyLayout's layoutstop handler shows
-  // nodes arriving directly at their real spots instead of flashing through a jumbled
-  // default layout first.
-  dependencyCy.elements().style('opacity', 0);
-
-  if (typeof cytoscapeExpandCollapse !== 'undefined' && typeof dependencyCy.expandCollapse === 'function') {
-    dependencyExpandCollapseApi = dependencyCy.expandCollapse({
-      layoutBy: {
-        name: 'elk',
-        fit: true,
-        padding: 72,
-        animate: true,
-        animationDuration: 360,
-        elk: {
-          algorithm: 'layered',
-          'elk.direction': 'DOWN',
-          'elk.layered.crossingMinimization.strategy': 'LAYER_SWEEP',
-          'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
-          'elk.layered.spacing.nodeNodeBetweenLayers': 70,
-          'elk.spacing.nodeNode': 45,
-          'elk.edgeRouting': 'ORTHOGONAL'
-        }
-      },
-      fisheye: false,
-      animate: true,
-      animationDuration: 360,
-      undoable: false,
-      cueEnabled: true,
     });
+  const nodeIds = new Set(nodes.map(n => n.id));
+  const links = graphEdges
+    .filter(e => nodeIds.has(e.from) && nodeIds.has(e.to))
+    .map(e => ({
+      source: e.from,
+      target: e.to,
+      relationship: e.relationship,
+      edgeIndex: e.edgeIndex,
+      baseColor: resolveCssColor(dependencyEdgeStyle(e.relationship).swatchColor),
+    }));
+  return { nodes, links };
+}
+
+let dependencyRawNodeMap = {};
+let dependencyRawEdges = [];
+
+function rebuildDependencyGraphData() {
+  if (!dependencyGraph3D) return;
+  dependencyGraph3D.graphData(buildForceGraphData(dependencyRawNodeMap, dependencyRawEdges));
+}
+
+// A WebGL init failure here (locked-down corporate GPU policy, old hardware, a headless
+// test runner with GPU disabled) must never take down the rest of the dashboard — the whole
+// fetchData() render cycle used to abort on this same exception, blanking products/compliance
+// too. Isolate it and fall back to the plain-text relationship list, which is always rendered.
+function initDependencyGraph3D(nodeMap, graphEdges) {
+  const container = document.getElementById('dependency-graph-cy');
+  if (!container || typeof ForceGraph3D === 'undefined') return;
+  dependencyRawNodeMap = nodeMap;
+  dependencyRawEdges = graphEdges;
+  dependencyBundlesHidden = false;
+
+  if (dependencyGraph3D) {
+    container.innerHTML = '';
+    dependencyGraph3D = null;
   }
 
-  runDependencyLayout();
+  try {
+    const dimColor = 'rgba(130,130,130,0.18)';
+    const dimLinkColor = 'rgba(130,130,130,0.12)';
+    const focusColor = resolveCssColor('var(--cds-metering-accent)');
+    const backgroundColor = resolveCssColor('var(--cds-background)');
+
+    dependencyGraph3D = ForceGraph3D()(container)
+      .backgroundColor(backgroundColor)
+      .graphData(buildForceGraphData(nodeMap, graphEdges))
+      .nodeId('id')
+      .nodeLabel(n => `${n.name}`)
+      .nodeVal('val')
+      .nodeColor(n => n.__focused ? focusColor : (n.__dimmed ? dimColor : n.baseColor))
+      .nodeOpacity(0.94)
+      .linkSource('source')
+      .linkTarget('target')
+      .linkColor(l => l.__selected ? focusColor : (l.__dimmed ? dimLinkColor : l.baseColor))
+      .linkWidth(l => l.__selected ? 2.4 : (l.__dimmed ? 0.4 : 0.9))
+      .linkOpacity(0.65)
+      .linkDirectionalParticles(l => l.relationship === 'measured_by' ? 4 : (l.relationship === 'bundled_as_ru' ? 2 : 0))
+      .linkDirectionalParticleWidth(1.8)
+      .linkDirectionalParticleSpeed(0.006)
+      .linkDirectionalParticleColor(() => focusColor)
+      .onNodeClick(node => { dependencyGraphHasBeenFocused = true; showDependencyNode(node.id); })
+      .onLinkClick(link => { dependencyGraphHasBeenFocused = true; showDependencyEdge(link.edgeIndex); })
+      .onNodeDragEnd(node => { node.fx = node.x; node.fy = node.y; node.fz = node.z; })
+      .width(container.clientWidth)
+      .height(container.clientHeight);
+
+    container.classList.add('is-ready');
+
+    setTimeout(() => {
+      if (dependencyExplorerState.selectedId && dependencyGraphHasBeenFocused) {
+        showDependencyNode(dependencyExplorerState.selectedId);
+      } else {
+        fitDependencyGraph();
+      }
+    }, 700);
+  } catch (err) {
+    dependencyGraph3D = null;
+    container.innerHTML = `
+      <div style="display:flex; align-items:center; justify-content:center; height:100%; padding:32px; text-align:center; color:var(--cds-text-secondary); font-size:13px;">
+        3D graph rendering is unavailable in this browser (WebGL failed to initialize: ${esc(err.message || err)}).<br>
+        The full relationship list below the graph area covers the same data.
+      </div>
+    `;
+  }
 }
+
 
 function riskColor(pct) {
   return pct >= 95 ? 'var(--cds-support-danger)' : pct >= 80 ? 'var(--cds-support-warning)' : 'var(--cds-support-success)';
@@ -4110,7 +4050,7 @@ function switchView(viewName) {
   // The dependency graph is built by the very first fetchData() cycle regardless of which
   // view is active on load — if "graph" wasn't the active view yet, its container was
   // display:none (0x0) when Cytoscape measured it. Re-measure now that it's actually visible.
-  if (viewName === 'graph' && dependencyCy) {
+  if (viewName === 'graph' && dependencyGraph3D) {
     requestAnimationFrame(resizeDependencyGraph);
   }
   document.querySelector('.cds--shell-main main')?.scrollTo({ top: 0, behavior: 'instant' });
@@ -4308,7 +4248,8 @@ function renderIfChanged(key, payload, fn) {
 
 function renderDashboard(data) {
   const cluster = data.cluster_info;
-  rawInspectorItems = [];
+  // rawInspectorStore is intentionally NOT reset here — sections skipped by renderIfChanged()
+  // keep DOM referencing ids handed out on an earlier cycle, and those must stay resolvable.
   supportedServices = data.supported_services || [];
   if (document.getElementById('add-modal')?.style.display === 'flex' && document.getElementById('supported-svc-select')?.options.length <= 1) {
     populateSupportedServiceDropdown();
@@ -4371,6 +4312,7 @@ function renderDashboard(data) {
   const financeMetrics = { totalVpc, totalRu, vpcEntitled, ruEntitled, vpcPct, ruPct, totalCpuUsed, totalCpuLimit, cpuPct };
   renderIfChanged('financeCommandCenter', { data: data.licensing, financeMetrics }, () => renderFinanceCommandCenter(data, financeMetrics));
   renderIfChanged('complianceControls', data.compliance_controls, () => renderComplianceControls(data.compliance_controls));
+  renderIfChanged('wkcFeatures', data.wkc_features, () => renderWkcFeatures(data.wkc_features));
   renderIfChanged('services', services, () => renderServices(services));
   renderIfChanged('licenseTable', data.licensing.products, () => renderLicenseTable(data.licensing.products));
   renderIfChanged('apiCoverage', data.licensing.apiCoverage, () => renderApiCoverage(data.licensing.apiCoverage || []));
@@ -4443,6 +4385,44 @@ function renderComplianceControls(controls) {
     </article>
   `;
   grid.innerHTML = pinCard + quotaCard + capacityCard;
+}
+
+function renderWkcFeatures(wkcFeatures) {
+  const grid = document.getElementById('wkc-features-grid');
+  if (!grid) return;
+  if (!wkcFeatures || !wkcFeatures.features) {
+    grid.innerHTML = '<p style="color:var(--cds-text-helper); font-size:13px;">Feature status unavailable — connect to a live cluster.</p>';
+    return;
+  }
+  grid.innerHTML = wkcFeatures.features.map(f => {
+    const detailIndex = addDetailItem(f.name, {
+      tags: [{ label: f.enabled ? 'enabled' : 'not enabled', cls: f.enabled ? 'cds--tag--green' : 'cds--tag--gray' }],
+      sectionsHtml:
+        detailSection('Verdict', `<p>${esc(f.evidence)}</p>`) +
+        detailSection('Evidence checked', `
+          <div class="cds--detail-kv">
+            <dt>CRD</dt><dd>${esc(f.cr)}</dd>
+            <dt>Instances found</dt><dd>${esc(f.instances)}</dd>
+            ${f.toggle_field ? `<dt>${esc(f.toggle_field)}</dt><dd>${esc(String(f.toggle_value))}</dd>` : ''}
+            ${f.workload_found !== null ? `<dt>Dedicated workload running</dt><dd>${esc(String(f.workload_found))}</dd>` : ''}
+          </div>
+        `),
+      payload: f,
+    });
+    return `
+      <article class="cds--endpoint-card" onclick="openRawInspector(${detailIndex})" style="cursor:pointer;">
+        <div style="display:flex; justify-content:space-between; gap:8px; align-items:flex-start;">
+          <strong style="font-size:13px;">${esc(f.name)}</strong>
+          <span class="cds--tag ${f.enabled ? 'cds--tag--green' : 'cds--tag--gray'}">${f.enabled ? 'enabled' : 'not enabled'}</span>
+        </div>
+        <p style="font-family:var(--cds-font-mono); font-size:11px; margin-top:6px; color:var(--cds-text-helper);">${esc(f.cr)}</p>
+        <p style="margin-top:8px; font-size:12px;">${esc(f.instances)} CR instance(s)${f.workload_found !== null ? `, workload ${f.workload_found ? 'found' : 'not found'}` : ''}</p>
+        <div class="cds--method-row" style="margin-top:8px;">
+          <span class="cds--tag cds--tag--gray">Click for evidence</span>
+        </div>
+      </article>
+    `;
+  }).join('');
 }
 
 function renderApiCoverage(endpoints) {
@@ -4610,7 +4590,7 @@ function renderDependencyExplorer(graph) {
   })).filter(edge => edge.fromNode && edge.toNode);
   const selectedId = nodeMap[previousSelectedId] ? previousSelectedId : nodes.find(node => node.id === 'watsonx_data') ? 'watsonx_data' : (nodes[0]?.id || '');
   dependencyExplorerState = { nodesById: nodeMap, edges: graphEdges, selectedId };
-  if (dependencyCy && dependencyGraphSignature === graphSignature && root.querySelector('#dependency-graph-cy')) {
+  if (dependencyGraph3D && dependencyGraphSignature === graphSignature && root.querySelector('#dependency-graph-cy')) {
     if (dependencyGraphHasBeenFocused) showDependencyNode(selectedId);
     return;
   }
@@ -4654,17 +4634,17 @@ function renderDependencyExplorer(graph) {
         <div class="cds--graph-controls">
           <button class="cds--raw-link" onclick="collapseDependencyBundles()" title="Collapse each bundled-as-RU group into one node">Collapse bundles</button>
           <button class="cds--raw-link" onclick="expandDependencyGraph()" title="Expand all collapsed bundle groups">Expand all</button>
-          <button class="cds--raw-link" onclick="runDependencyLayout()">Re-layout</button>
+          <button class="cds--raw-link" onclick="reheatDependencyGraph()" title="Re-run the 3D physics simulation">Re-layout</button>
           <button class="cds--raw-link" onclick="fitDependencyGraph()">Fit</button>
+          <button class="cds--raw-link" id="dependency-rotate-btn" onclick="toggleDependencyRotate()" title="Auto-rotate the camera">&#8635; Rotate</button>
           <button class="cds--raw-link" onclick="zoomDependencyGraph(0.8)" title="Zoom out" aria-label="Zoom out">&minus;</button>
-          <span class="cds--zoom-readout" id="dependency-zoom-readout">100%</span>
           <button class="cds--raw-link" onclick="zoomDependencyGraph(1.25)" title="Zoom in" aria-label="Zoom in">&plus;</button>
         </div>
-        <div id="dependency-graph-cy" role="img" aria-label="Interactive product dependency graph. Scroll or pinch to zoom, drag to pan, click a node or edge for detail. A full text list of every relationship follows below the graph for screen-reader and keyboard use."></div>
+        <div id="dependency-graph-cy" role="img" aria-label="Interactive 3D product dependency graph. Drag to orbit the camera, scroll to zoom, drag a node to reposition it, click a node or edge for detail. A full text list of every relationship follows below the graph for screen-reader and keyboard use."></div>
       </div>
       <aside class="cds--neo-side">
         <h3>How to read the graph</h3>
-        <p>Only active components shown, filtered by live CRs and <code>WXD_EDITION</code>. Scroll/pinch to zoom, drag to pan, click any node or edge for detail, or use the text list below the graph.</p>
+        <p>Only active components shown, filtered by live CRs and <code>WXD_EDITION</code>. Drag to orbit, scroll to zoom, drag any sphere to reposition it — it springs back into the simulation on release. Click any node or animated link for detail, or use the text list below the graph.</p>
         <div class="cds--neo-legend" style="flex-direction:column; gap:6px; margin-top:10px;">
           ${renderDependencyLegend()}
         </div>
@@ -4675,7 +4655,7 @@ function renderDependencyExplorer(graph) {
     <p style="font-size:12px; color:var(--cds-text-secondary); margin-bottom:var(--cds-spacing-04);">Every edge in the graph above, as plain text — the source of truth for screen readers, keyboard navigation, and anyone who prefers a list to a canvas.</p>
     <div class="cds--relationship-list">${relationshipCards}</div>
   `;
-  initDependencyCytoscape(nodeMap, graphEdges);
+  initDependencyGraph3D(nodeMap, graphEdges);
   if (dependencyGraphHasBeenFocused) showDependencyNode(dependencyExplorerState.selectedId);
 }
 
@@ -4702,29 +4682,54 @@ function renderServices(services) {
     const memPct = Math.min(100, Math.round((memUsed / Math.max(memLimit, 1)) * 100));
 
     const depsHtml = s.dependencies && s.dependencies.length > 0
-      ? `<div style="font-size:11px; color:var(--cds-text-helper); margin-top:6px;"><strong>Dependencies:</strong> ${s.dependencies.map(d => `<code class="cds--snippet">${esc(d)}</code>`).join(' ')}</div>`
+      ? `<div class="cds--detail-kv" style="margin-top:8px;"><dt>Dependencies</dt><dd>${s.dependencies.map(d => `<code class="cds--snippet">${esc(d)}</code>`).join(' ')}</dd></div>`
       : '';
-    const rawIndex = addRawInspectorItem(`Service telemetry: ${s.name}`, {
-      service_id: id,
-      active_scale: activeScale,
-      computed: {
-        cpu_used_cores: Number(cpuUsed),
-        cpu_limit_cores: Number(cpuLimit),
-        cpu_percent: cpuPct,
-        memory_used_gb: Number(memUsed),
-        memory_limit_gb: Number(memLimit),
-        memory_percent: memPct
-      },
-      source: s
-    });
+    const liveTag = s.is_live_cr
+      ? `<span class="cds--tag cds--tag--green">Live — confirmed via oc get</span>`
+      : `<span class="cds--tag cds--tag--gray">Estimated — cluster unreachable, catalog default</span>`;
     const serviceBars = renderMiniBars(
       [cpuPct * 0.45, memPct * 0.45, cpuPct * 0.62, memPct * 0.62, cpuPct * 0.78, memPct * 0.78, cpuPct, memPct, Math.max(cpuPct, memPct) * 0.9, Math.min(100, (cpuPct + memPct) / 2), cpuPct, memPct],
       cpuPct > 85 || memPct > 85 ? 'var(--cds-support-danger)' : 'var(--cds-interactive-01)'
     );
 
+    const detailIndex = addDetailItem(s.name, {
+      tags: [
+        { label: s.status, cls: s.status === 'CRITICAL' ? 'cds--tag--red' : s.status === 'WARNING' ? 'cds--tag--purple' : 'cds--tag--green' },
+        { label: `${s.category} • ${s.tier}`, cls: 'cds--tag--gray' },
+      ],
+      sectionsHtml:
+        detailSection('Description', `<p>${esc(s.description)}</p>${liveTag}`) +
+        detailSection('Metering interpretation', `<p>${esc(s.license_rule)}</p>${depsHtml}`) +
+        detailSection('Custom resource', `
+          <div class="cds--detail-kv">
+            <dt>Kind</dt><dd>${esc(s.cr_kind)}</dd>
+            <dt>Name</dt><dd>${esc(s.cr_name)}</dd>
+            <dt>CR sizing</dt><dd>${esc(s.crd_sizing)}</dd>
+            <dt>Status</dt><dd>${esc(s.cr_status || 'Unknown')}</dd>
+          </div>
+          <button class="cds--btn cds--btn--secondary" style="margin-top:10px;" onclick="event.stopPropagation(); viewCrYaml('${esc(id)}', ${s.cr_name ? `'${esc(s.cr_name)}'` : 'null'}, '${esc(s.name)}')">View live CR as YAML</button>
+        `) +
+        detailSection('Resource usage (active sizing: ' + esc(activeScale) + ')', `
+          <div class="cds--metric-item">
+            <div class="cds--metric-label"><span>CPU Allocation</span><span class="cds--metric-value">${cpuUsed} / ${cpuLimit} Cores (${cpuPct}%)</span></div>
+            <div class="cds--progress-bar"><div class="cds--progress-bar__fill" style="background-color:${cpuPct > 85 ? 'var(--cds-support-danger)' : 'var(--cds-interactive-01)'}; width:${cpuPct}%;"></div></div>
+          </div>
+          <div class="cds--metric-item" style="margin-top:10px;">
+            <div class="cds--metric-label"><span>Memory Working Set</span><span class="cds--metric-value">${memUsed} / ${memLimit} GB (${memPct}%)</span></div>
+            <div class="cds--progress-bar"><div class="cds--progress-bar__fill" style="background-color:${memPct > 85 ? 'var(--cds-support-danger)' : 'var(--cds-support-success)'}; width:${memPct}%;"></div></div>
+          </div>
+        `),
+      payload: {
+        service_id: id,
+        active_scale: activeScale,
+        computed: { cpu_used_cores: Number(cpuUsed), cpu_limit_cores: Number(cpuLimit), cpu_percent: cpuPct, memory_used_gb: Number(memUsed), memory_limit_gb: Number(memLimit), memory_percent: memPct },
+        source: s,
+      },
+    });
+
     const card = document.createElement('div');
     card.className = 'cds--service-card';
-    card.onclick = () => openRawInspector(rawIndex);
+    card.onclick = () => openRawInspector(detailIndex);
     card.innerHTML = `
       <div>
         <div class="cds--svc-top">
@@ -4737,13 +4742,13 @@ function renderServices(services) {
         <div class="cds--svc-desc">${esc(s.description)}</div>
         <div class="cds--license-terms-box">
           <strong>Metering interpretation:</strong>
-          ${esc(s.license_rule)}
-          ${depsHtml}
+          <span class="cds--clamp-text">${esc(s.license_rule)}</span>
         </div>
         <div class="cds--meta-row">
           <span class="cds--tag cds--tag--purple">CR sizing: ${esc(activeScale)}</span>
-          <span class="cds--tag cds--tag--gray">CR: ${esc(s.cr_name)}</span>
-          <span class="cds--tag cds--tag--blue">Kind: ${esc(s.cr_kind)}</span>
+          <span class="cds--tag cds--tag--gray" style="cursor:pointer;" title="Click to view live YAML" onclick="event.stopPropagation(); viewCrYaml('${esc(id)}', ${s.cr_name ? `'${esc(s.cr_name)}'` : 'null'}, '${esc(s.name)}')">CR: ${esc(s.cr_name)}</span>
+          <span class="cds--tag cds--tag--blue" style="cursor:pointer;" title="Click to view live YAML" onclick="event.stopPropagation(); viewCrYaml('${esc(id)}', ${s.cr_name ? `'${esc(s.cr_name)}'` : 'null'}, '${esc(s.name)}')">Kind: ${esc(s.cr_kind)}</span>
+          ${s.is_live_cr ? '' : '<span class="cds--tag cds--tag--gray" title="Cluster unreachable — this card is showing a catalog default, not a confirmed live reading">estimated</span>'}
         </div>
         ${serviceBars}
         <div class="cds--metric-item">
@@ -4765,12 +4770,23 @@ function renderServices(services) {
           </div>
         </div>
         <div class="cds--method-row">
-          <span class="cds--tag cds--tag--gray">Click card for pod, CR and JSON evidence</span>
+          <span class="cds--tag cds--tag--gray">Click card for detail &middot; click CR/Kind for live YAML</span>
         </div>
       </div>
     `;
     grid.appendChild(card);
   }
+}
+
+function licenseMetricMeaning(rawMetricName) {
+  const m = String(rawMetricName || '').toUpperCase();
+  if (m === 'VIRTUAL_PROCESSOR_CORE') {
+    return 'Virtual Processor Core (VPC). IBM: "Generally, 1 VPC = 1 physical core or 1 virtual core." Counted from the pod vCPU LIMIT (potential capacity), not live/instantaneous usage.';
+  }
+  if (m === 'RESOURCE_UNIT') {
+    return 'Resource Unit (RU) — the metric watsonx.data editions are licensed under. RU and VPC are separate pools; IBM does not define a universal RU→VPC conversion (only specific documented engine ratios, e.g. Milvus, exist).';
+  }
+  return `Reported as-is by IBM License Service; this dashboard has no documented interpretation for "${esc(rawMetricName || 'this metric')}" yet.`;
 }
 
 function renderLicenseTable(products) {
@@ -4781,9 +4797,26 @@ function renderLicenseTable(products) {
   }
   grid.innerHTML = products.map(p => {
     const metricLabel = p.metricNameNormalized || p.metricName || 'Reported';
-    const rawIndex = addRawInspectorItem(`License Service product: ${p.name}`, p);
+    const detailIndex = addDetailItem(p.name, {
+      tags: [
+        { label: p.status || 'Reported', cls: 'cds--tag--green' },
+        { label: p.edition || p.release || 'Reported', cls: 'cds--tag--purple' },
+      ],
+      sectionsHtml:
+        detailSection('Reported value', `<p style="font-weight:600; color:var(--cds-interactive-01); font-family:var(--cds-font-mono); font-size:20px;">${esc(p.metricQuantity ?? 0)} ${esc(metricLabel)}</p>`) +
+        detailSection('What this metric means', `<p>${licenseMetricMeaning(p.metricName)}</p>`) +
+        detailSection('Where this came from', `
+          <div class="cds--detail-kv">
+            <dt>IBM product ID</dt><dd>${esc(p.id || p.productId || 'n/a')}</dd>
+            <dt>Raw metricName</dt><dd>${esc(p.metricName || 'n/a')}</dd>
+            <dt>Peak reported</dt><dd>${esc(p.metricPeakDate || 'n/a')}</dd>
+            <dt>Endpoint</dt><dd>IBM License Service <code>/products</code></dd>
+          </div>
+        `),
+      payload: p,
+    });
     return `
-      <article class="cds--endpoint-card" onclick="openRawInspector(${rawIndex})" style="cursor:pointer;">
+      <article class="cds--endpoint-card" onclick="openRawInspector(${detailIndex})" style="cursor:pointer;">
         <div style="display:flex; justify-content:space-between; gap:8px; align-items:flex-start;">
           <strong style="font-size:13px;">${esc(p.name)}</strong>
           <span class="cds--tag cds--tag--green">${esc(p.status || 'Reported')}</span>
@@ -4795,6 +4828,9 @@ function renderLicenseTable(products) {
         </div>
         <p style="margin-top:10px; font-weight:600; color:var(--cds-interactive-01); font-family:var(--cds-font-mono); font-size:16px;">${esc(p.metricQuantity ?? 0)} ${esc(metricLabel)}</p>
         ${p.metricPeakDate ? `<p style="margin-top:4px; color:var(--cds-text-helper); font-size:11px;">Peak reported: ${esc(p.metricPeakDate)}</p>` : ''}
+        <div class="cds--method-row" style="margin-top:8px;">
+          <span class="cds--tag cds--tag--gray">Click for meaning</span>
+        </div>
       </article>
     `;
   }).join('');
@@ -4844,9 +4880,9 @@ initView();
 fetchData();
 setInterval(fetchData, 10000);
 
-// Previously nothing ever told cytoscape its container had changed size — the graph could
-// render at a stale width after a viewport resize or the 900px layout breakpoint collapsing
-// .cds--neo-layout to one column. Debounced so a drag-resize doesn't thrash ELK's layout.
+// Nothing tells the WebGL canvas its container changed size on its own — it would render at
+// a stale width after a viewport resize or the 900px layout breakpoint collapsing
+// .cds--neo-layout to one column. Debounced so a drag-resize doesn't thrash the renderer.
 let dependencyResizeTimer = null;
 window.addEventListener('resize', () => {
   clearTimeout(dependencyResizeTimer);
@@ -4894,6 +4930,15 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(json.dumps({"status": result.get("status", "error"), "message": result.get("reason", "IBM License Service /snapshot unavailable.")}).encode("utf-8"))
+        elif parsed.path.startswith("/api/cr/"):
+            service_id = urllib.parse.unquote(parsed.path[len("/api/cr/"):])
+            query = urllib.parse.parse_qs(parsed.query)
+            cr_name = (query.get("name") or [None])[0]
+            result = self.collector.get_cr_yaml(service_id, cr_name)
+            self.send_response(200 if result.get("status") == "ok" else 404)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode("utf-8"))
         elif parsed.path.startswith("/vendor/"):
             rel_path = urllib.parse.unquote(parsed.path.removeprefix("/vendor/"))
             asset_path = os.path.abspath(os.path.join(VENDOR_DIR, rel_path))
