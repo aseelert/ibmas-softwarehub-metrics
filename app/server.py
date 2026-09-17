@@ -2466,10 +2466,35 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     width: 100%;
     height: 820px;
     display: block;
+    position: relative;
     opacity: 0;
     transition: opacity 0.6s ease;
   }
   #dependency-graph-cy.is-ready { opacity: 1; }
+  .cds--graph-labels-layer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    overflow: hidden;
+  }
+  .cds--graph-node-label {
+    position: absolute;
+    top: 0;
+    left: 0;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    font-family: var(--cds-font-mono);
+    color: var(--cds-text-primary);
+    text-shadow: 0 1px 3px var(--cds-background), 0 0 6px var(--cds-background);
+    text-align: center;
+    transition: opacity 0.2s ease, color 0.2s ease;
+    will-change: transform;
+  }
+  .cds--graph-node-label.is-dimmed { opacity: 0.28; }
+  .cds--graph-node-label.is-focused { color: var(--cds-metering-accent); opacity: 1; font-weight: 600; }
   .cds--graph-controls {
     position: absolute;
     top: 12px;
@@ -3705,7 +3730,15 @@ function highlightDependencyGraph(selectedId, selectedEdgeIndex = null) {
   if (!dependencyGraph3D) return;
   const lineage = collectDependencyLineage(selectedId);
   const { nodes, links } = dependencyGraph3D.graphData();
-  nodes.forEach(n => { n.__focused = n.id === selectedId; n.__dimmed = !lineage.nodeIds.has(n.id); });
+  nodes.forEach(n => {
+    n.__focused = n.id === selectedId;
+    n.__dimmed = !lineage.nodeIds.has(n.id);
+    const label = dependencyLabelEls[n.id];
+    if (label) {
+      label.classList.toggle('is-focused', n.__focused);
+      label.classList.toggle('is-dimmed', n.__dimmed);
+    }
+  });
   links.forEach(l => {
     l.__dimmed = !lineage.edgeIndexes.has(l.edgeIndex);
     l.__selected = selectedEdgeIndex !== null && l.edgeIndex === selectedEdgeIndex;
@@ -3841,6 +3874,61 @@ let dependencyRawEdges = [];
 function rebuildDependencyGraphData() {
   if (!dependencyGraph3D) return;
   dependencyGraph3D.graphData(buildForceGraphData(dependencyRawNodeMap, dependencyRawEdges));
+  syncDependencyLabels();
+}
+
+// Product-name labels under each sphere, kept as plain HTML rather than 3D sprites — the
+// vendored 3d-force-graph build falls back to a minimal internal Three.js subset with no
+// Sprite/CanvasTexture (real three.js only ships ES modules now, which would force converting
+// this whole classic inline <script> to a module and re-exposing every onclick-referenced
+// function on window — not worth it for text labels). graph2ScreenCoords() is 3d-force-graph's
+// own public API for projecting a node's live position to canvas pixels every frame, which is
+// all an HTML overlay needs.
+let dependencyLabelEls = {};
+let dependencyLabelsRafId = null;
+
+function syncDependencyLabels() {
+  const container = document.getElementById('dependency-graph-cy');
+  const layer = container?.querySelector('.cds--graph-labels-layer');
+  if (!container || !layer || !dependencyGraph3D) return;
+  const { nodes } = dependencyGraph3D.graphData();
+  const seen = new Set();
+  nodes.forEach(n => {
+    seen.add(n.id);
+    let el = dependencyLabelEls[n.id];
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'cds--graph-node-label';
+      layer.appendChild(el);
+      dependencyLabelEls[n.id] = el;
+    }
+    el.textContent = n.name;
+    el.classList.toggle('is-focused', !!n.__focused);
+    el.classList.toggle('is-dimmed', !!n.__dimmed);
+  });
+  Object.keys(dependencyLabelEls).forEach(id => {
+    if (!seen.has(id)) {
+      dependencyLabelEls[id].remove();
+      delete dependencyLabelEls[id];
+    }
+  });
+}
+
+function startDependencyLabelsLoop() {
+  if (dependencyLabelsRafId) cancelAnimationFrame(dependencyLabelsRafId);
+  const step = () => {
+    dependencyLabelsRafId = requestAnimationFrame(step);
+    const panel = document.querySelector('[data-view-panel="graph"]');
+    if (!dependencyGraph3D || !panel || panel.hidden) return;
+    const { nodes } = dependencyGraph3D.graphData();
+    nodes.forEach(n => {
+      const el = dependencyLabelEls[n.id];
+      if (!el || n.x === undefined) return;
+      const { x, y } = dependencyGraph3D.graph2ScreenCoords(n.x, n.y, n.z);
+      el.style.transform = `translate(-50%, 4px) translate(${x}px, ${y}px)`;
+    });
+  };
+  dependencyLabelsRafId = requestAnimationFrame(step);
 }
 
 // A WebGL init failure here (locked-down corporate GPU policy, old hardware, a headless
@@ -3858,6 +3946,7 @@ function initDependencyGraph3D(nodeMap, graphEdges) {
     container.innerHTML = '';
     dependencyGraph3D = null;
   }
+  dependencyLabelEls = {};
 
   try {
     const dimColor = 'rgba(130,130,130,0.18)';
@@ -3884,9 +3973,20 @@ function initDependencyGraph3D(nodeMap, graphEdges) {
       .linkDirectionalParticleColor(() => focusColor)
       .onNodeClick(node => { dependencyGraphHasBeenFocused = true; showDependencyNode(node.id); })
       .onLinkClick(link => { dependencyGraphHasBeenFocused = true; showDependencyEdge(link.edgeIndex); })
-      .onNodeDragEnd(node => { node.fx = node.x; node.fy = node.y; node.fz = node.z; })
+      .onNodeDrag(() => { container.style.cursor = 'grabbing'; })
+      .onNodeDragEnd(node => {
+        node.fx = node.x; node.fy = node.y; node.fz = node.z;
+        container.style.cursor = 'grab';
+      })
+      .onNodeHover(node => { container.style.cursor = node ? 'grab' : 'default'; })
       .width(container.clientWidth)
       .height(container.clientHeight);
+
+    const labelsLayer = document.createElement('div');
+    labelsLayer.className = 'cds--graph-labels-layer';
+    container.appendChild(labelsLayer);
+    syncDependencyLabels();
+    startDependencyLabelsLoop();
 
     container.classList.add('is-ready');
 
@@ -3899,6 +3999,7 @@ function initDependencyGraph3D(nodeMap, graphEdges) {
     }, 700);
   } catch (err) {
     dependencyGraph3D = null;
+    if (dependencyLabelsRafId) cancelAnimationFrame(dependencyLabelsRafId);
     container.innerHTML = `
       <div style="display:flex; align-items:center; justify-content:center; height:100%; padding:32px; text-align:center; color:var(--cds-text-secondary); font-size:13px;">
         3D graph rendering is unavailable in this browser (WebGL failed to initialize: ${esc(err.message || err)}).<br>
@@ -4644,7 +4745,7 @@ function renderDependencyExplorer(graph) {
       </div>
       <aside class="cds--neo-side">
         <h3>How to read the graph</h3>
-        <p>Only active components shown, filtered by live CRs and <code>WXD_EDITION</code>. Drag to orbit, scroll to zoom, drag any sphere to reposition it — it springs back into the simulation on release. Click any node or animated link for detail, or use the text list below the graph.</p>
+        <p>Only active components shown, filtered by live CRs and <code>WXD_EDITION</code>. Drag empty space to orbit the camera, scroll to zoom, or grab any labeled sphere and drag it to rearrange the layout — it stays where you drop it. Click any node or animated link for detail, or use the text list below the graph.</p>
         <div class="cds--neo-legend" style="flex-direction:column; gap:6px; margin-top:10px;">
           ${renderDependencyLegend()}
         </div>
